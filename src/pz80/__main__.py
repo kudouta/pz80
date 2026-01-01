@@ -2,6 +2,8 @@
 
 import argparse
 import importlib
+import importlib.util
+import os
 import sys
 
 from pz80 import __about__, asm, disasm
@@ -94,28 +96,45 @@ def command_disasm(args):
 
     # 設定ファイル読み込み
     ope = disasm.Disasm()
-    if(args.config is not None):
-        try:
-            m = importlib.import_module(args.config)
-            if m is not None:
+    if args.config is not None:
+        m = None
+        # ファイルパスとして存在する場合は直接ロード
+        if os.path.exists(args.config):
+            try:
+                spec = importlib.util.spec_from_file_location("config_module", args.config)
+                if spec and spec.loader:
+                    m = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(m)
+            except Exception as e:
+                print(f"Error: Failed to load config file '{args.config}': {e}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # モジュールとしてインポート試行
+            module_name = args.config
+            if module_name.endswith('.py'):
+                module_name = module_name[:-3]
+            
+            # カレントディレクトリをパスに追加
+            if os.getcwd() not in sys.path:
+                sys.path.insert(0, os.getcwd())
+
+            try:
+                m = importlib.import_module(module_name)
+            except ModuleNotFoundError:
+                print(f"Error: Config module '{args.config}' not found.", file=sys.stderr)
+                sys.exit(1)
+        
+        if m:
+            if hasattr(m, 'data'):
                 ope.datamap = m.data
+            if hasattr(m, 'chr'):
                 ope.cpu.strmap = m.chr
+            if hasattr(m, 'output'):
                 output = m.output
 
-        except ModuleNotFoundError:
-            print(f"Error: Config module '{args.config}' not found.", file=sys.stderr)
-            sys.exit(1)
-
-        except IndexError:
-            print(f"Error: Invalid config file '{args.config}'. Missing 'data', 'chr', or 'output'.", file=sys.stderr)
-            sys.exit(1)
-
-        except AttributeError:
-            pass
-
     for p in ope.datamap:
-        if(p[0] >= p[1]):
-            print(f"Error: Invalid data range in config: start=0x{p[0]:04X} >= end=0x{p[1]:04X}", file=sys.stderr)
+        if p[0] > p[1]:
+            print(f"Error: Invalid data range in config: start=0x{p[0]:04X} > end=0x{p[1]:04X}", file=sys.stderr)
             sys.exit(1)
 
     # 逆アセンブル
@@ -153,7 +172,7 @@ def output_default(dis, sw):
                 print(f'{indent}{p["asm"]}')
         else:
             addr_str = f'0x{p.get("address", 0):04X}'
-            op_bytes = p["opcode"]
+            op_bytes = p.get("opcode", [])
             op_str = " ".join(f"{b:02X}" for b in op_bytes)
             label_str = p.get("label", "")
             asm_str = p.get("asm", "")

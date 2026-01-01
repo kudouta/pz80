@@ -1,9 +1,11 @@
+import io
 import os
 import tempfile
 import unittest
 from argparse import Namespace
+from unittest.mock import patch
 
-from pz80.__main__ import command_asm
+from pz80.__main__ import command_asm, command_disasm
 
 
 class TestCommandAsm(unittest.TestCase):
@@ -125,6 +127,61 @@ class TestCommandAsm(unittest.TestCase):
             
         self.assertEqual(len(data), 16)
         self.assertEqual(data[0], 0xFF)
+
+
+class TestCommandDisasm(unittest.TestCase):
+    """command_disasm関数のテストクラス"""
+
+    def setUp(self):
+        # テスト用の一時ファイルを作成
+        self.bin_fd, self.bin_path = tempfile.mkstemp(suffix='.bin')
+        self.cfg_fd, self.cfg_path = tempfile.mkstemp(suffix='.py', text=True)
+        os.close(self.bin_fd)
+        os.close(self.cfg_fd)
+
+    def tearDown(self):
+        # 一時ファイルを削除
+        if os.path.exists(self.bin_path):
+            os.remove(self.bin_path)
+        if os.path.exists(self.cfg_path):
+            os.remove(self.cfg_path)
+
+    def _write_bin(self, content):
+        """バイナリデータを一時ファイルに書き込むヘルパー"""
+        with open(self.bin_path, 'wb') as f:
+            f.write(content)
+
+    def _write_cfg(self, content):
+        """設定を一時ファイルに書き込むヘルパー"""
+        with open(self.cfg_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    def test_config_loading_from_path(self):
+        """設定ファイルをファイルパスで指定して読み込む機能のテスト"""
+        # 設定ファイルでアドレス 0x0000 をデータ領域として定義
+        self._write_cfg("data = [[0x0000, 0x0000]]")
+        
+        # 入力バイナリはアドレス 0x0000 に NOP (0x00) を配置
+        self._write_bin(b'\x00')
+
+        args = Namespace(
+            input=[self.bin_path],
+            config=self.cfg_path,
+            start=0,
+            nodump=False,
+            output=None
+        )
+
+        captured_output = io.StringIO()
+        with patch('sys.stdout', captured_output), patch('sys.exit') as mock_exit:
+            command_disasm(args)
+        
+        mock_exit.assert_not_called()
+        output = captured_output.getvalue()
+        
+        # 設定ファイルが読み込まれ、0x00 が "db 0x00" として逆アセンブルされることを確認
+        self.assertIn("db 0x00", output)
+        self.assertNotIn("nop", output.lower())
 
 if __name__ == '__main__':
     unittest.main()
