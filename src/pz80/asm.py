@@ -436,7 +436,7 @@ class Asm:
                 continue
 
             # 予約語チェック
-            if list(filter(lambda x: x == asm[0].lower(), self.cpu.reserved)):
+            if asm[0].lower() in self.cpu.reserved:
                 raise ValueError(f"Invalid label '{asm[0]}' in line {line}: Reserved word")
 
             # 重複チェック

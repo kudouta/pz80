@@ -55,18 +55,20 @@ class Disasm:
         return self._tmpl(u["asm"])
 
     def _handle_2bytes(self, u, opcode, adr):
-        if u.get("rel") is None:
-            return self._tmpl(u["asm"]).replace("{0}", "{0:02X}").format(opcode[1])
-        return self._tmpl(u["asm"]).replace("0x{0}", "L_{0:04X}").format(self._reladdr(opcode[1], adr))
+        tmpl = self._tmpl(u["asm"])
+        if u.get("rel") is not None:
+            return tmpl.replace("0x{0}", "L_{0:04X}").format(self._reladdr(opcode[1], adr))
+        return tmpl.replace("{0}", "{0:02X}").format(opcode[1])
 
     def _handle_3bytes(self, u, opcode, adr):
         if u.get("jmp") is not None:
             return self._tmpl(u["asm"]).replace("0x{1}{0}", "L_{1:02X}{0:02X}").format(opcode[1], opcode[2])
 
-        if u["type"] == "byte":
+        op_type = u.get("type")
+        if op_type == "byte":
             return self._tmpl(u["asm"]).replace("{0}", "{0:02X}").format(opcode[2])
 
-        if u["type"] == "word":
+        if op_type == "word":
             return (
                 self._tmpl(u["asm"])
                 .replace("{0}", "{0:02X}")
@@ -80,7 +82,8 @@ class Disasm:
             # ddcb / fdcb
             return self._tmpl(u["asm"]).replace("{0}", "{0:02X}").format(opcode[2])
 
-        if (u["type"] == "byte") or (u["type"] == "word"):
+        op_type = u.get("type")
+        if op_type in ("byte", "word"):
             return (
                 self._tmpl(u["asm"])
                 .replace("{0}", "{0:02X}")

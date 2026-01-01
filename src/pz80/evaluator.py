@@ -34,6 +34,22 @@ class ExpressionEvaluator:
         """次のトークンを消費します。"""
         self.idx += 1
 
+    def _parse_char_literal(self, token):
+        """文字リテラルを解析して数値を返します。"""
+        try:
+            v = ast.literal_eval(token)
+        except (ValueError, SyntaxError) as e:
+            raise ValueError(f"Invalid character literal '{token}' on line {self.line_num}") from e
+
+        if isinstance(v, str):
+            if len(v) == 1:
+                return ord(v)
+            elif len(v) == 2:
+                return (ord(v[0]) << 8) | ord(v[1])
+            raise ValueError("String literal in expression must be 1 or 2 characters")
+
+        raise ValueError(f"Invalid literal type '{token}' on line {self.line_num}")
+
     def parse_factor(self):
         """因子（数値、ラベル、または括弧で囲まれた式）を解析します。"""
         token = self.peek()
@@ -60,18 +76,7 @@ class ExpressionEvaluator:
         # Character literals
         if (token.startswith("'") and token.endswith("'")) or \
            (token.startswith('"') and token.endswith('"')):
-            try:
-                v = ast.literal_eval(token)
-            except (ValueError, SyntaxError) as e:
-                 raise ValueError(f"Invalid character literal '{token}' on line {self.line_num}") from e
-
-            if isinstance(v, str):
-                if len(v) == 1:
-                    return ord(v)
-                elif len(v) == 2:
-                    return (ord(v[0]) << 8) | ord(v[1])
-                else:
-                    raise ValueError("String literal in expression must be 1 or 2 characters")
+            return self._parse_char_literal(token)
 
         # Numeric literals
         try:
