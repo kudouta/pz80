@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+
+import re
+
+from pz80 import z80
+from pz80._vectors import parse_entry
+
+# M1サイクル対象プレフィックスバイト
+_Z80_PREFIXES = frozenset([0xDD, 0xFD, 0xED, 0xCB])
+
+# `label_names` に使える名前。`\w` だけでは足りない —— `.` は pz80 のラベルとして
+# 合法で（構造体レイアウトの `TASK.pos` が依存している）、`StrA.D.1980` のような
+# 名前を実際に書きたくなる。逆にトークナイザの区切り文字（`,` `(` `)` など）を
+# 含む名前は 1 トークンに収まらず、出力が再アセンブルできなくなる。
+_LABEL_NAME_CHARS = r"[\w.]+"
+_RE_LABEL_NAME = re.compile(rf"^{_LABEL_NAME_CHARS}$")
+
+# `equ` の値に使える辞書キー。read と write で役割が違うハードウェアレジスタ
+# （`0xB000` が読むと IrqEnable、書くと NmiOn、など）を 1 エントリで書くため。
+_EQU_MODES = ("r", "w")
+
+
+class Disasm:
+    """Z80逆アセンブラクラス"""
+
+    def __init__(self):
+        """Disasmクラスを初期化します。"""
+        self.cpu = z80.Z80()
+        self._datamap = []  # 逆アセンブル時にデーターとして扱うアドレス範囲テーブル
+        self._valid_ranges = None  # バイナリが実在する範囲。None なら全域
+        # ラベル参照を拾う。`@名前` は省略可なので、接尾辞の無い従来の出力も通る。
+        #
+        # **区切りが `@` なのは偶然ではない。** `walk._RE_LABEL` が
+        # `\bL_([0-9A-Fa-f]{4})\b` と末尾に \b を要求するため、4 桁の直後は
+        # 非単語文字でなければならない。`_` も英数字も単語文字なので使えず、
+        # 候補は `@` と `.` だけになる。`.` は構造体レイアウトのメンバ名
+        # （`TASK.pos`）と見分けが付かないので `@` を選んだ。
+        self._re_label = re.compile(rf"(L_([0-9a-fA-F]{{4}})(?:@{_LABEL_NAME_CHARS})?)")
+        self._dispatch = {
+            1: self._handle_1byte,
+            2: self._handle_2bytes,
+            3: self._handle_3bytes,
+            4: self._handle_4bytes,
+        }
+        self.m1_handler = None  # M1サイクルハンドラー (address, byte) -> byte
+        self.label_addresses = []  # 強制的にラベルを付与するアドレスのリスト
+        self._label_names = {}
+        self._equ_names = {}
+
+    @property
+    def equ_names(self):
+        """`EQU` として名前を付けるアドレス `{アドレス: {"r": 名前, "w": 名前}}`。
+
+        Returns:
+            dict: キーは int、値は `r` / `w` を持つ dict（片方だけのこともある）。
+        """
+        return self._equ_names
+
+    @equ_names.setter
+    def equ_names(self, value):
+        """`EQU` 名を検証して設定します。
+
+        **`labels` と役割が違います。** `labels` は「その行にラベルを貼る」機構で、
+        貼る行が無いアドレス（RAM・I/O）には使えません。`equ` は逆アセンブル範囲の
+        外を指す定数のためのもので、`MirrorRam: EQU 0x8000` を先頭に出し、
+        参照側は**裸の名前**にします。住所を名前に残す必要はありません。
+        住所は `EQU` の定義行にあり、それは手書きでも同じ場所だからです。
+
+        値は文字列か、`r` / `w` を持つ dict です。
+
+            equ = {
+                0x8000: "MirrorRam",                      # 読み書き共通
+                0xB000: {"r": "IrqEnable", "w": "NmiOn"}, # 役割が違う
+                0xB801: {"w": "SndVolume"},               # 書き専用
+            }
+
+        `dict(r=..., w=...)` でも同じものになりますが、利用者の設定ファイルを
+        lint にかけると ruff の `C408`（`Unnecessary dict() call`）が出るので、
+        例は波括弧で書いています。
+
+        Args:
+            value (dict | None): `{アドレス: 名前 | dict}`。
+
+        Raises:
+            ValueError: 名前に使えない文字、未知のキー、空の指定の場合。
+        """
+        parsed = {}
+        for key, spec in (value or {}).items():
+            names = {"r": spec, "w": spec} if isinstance(spec, str) else spec
+            if not isinstance(names, dict) or not names:
+                raise ValueError(
+                    f"Invalid equ entry for address {key}: {spec!r} "
+                    f'(use a name, or {{"r": ..., "w": ...}})'
+                )
+            unknown = set(names) - set(_EQU_MODES)
+            if unknown:
+                raise ValueError(
+                    f"Invalid equ keys for address {key}: {sorted(unknown)} "
+                    f"(use {' / '.join(_EQU_MODES)})"
+                )
+            for name in names.values():
+                if not isinstance(name, str) or not _RE_LABEL_NAME.match(name):
+                    raise ValueError(
+                        f"Invalid label name for address {key}: {name!r} "
+                        f"(use letters, digits, '_' and '.')"
+                    )
+            parsed[parse_entry(key)] = dict(names)
+        self._equ_names = parsed
+
+    def _equ_rows(self):
+        """`EQU` 定義行を作ります（出力の先頭に置く）。
+
+        同じアドレスに読み名と書き名があるときは 2 行出します。pz80 では
+        値が同じ `EQU` を別名で定義できます（重複検査は名前に対して行うため）。
+
+        Returns:
+            list[dict]: `{"asm": "NAME: EQU 0xXXXX"}` の並び。アドレス順。
+        """
+        rows = []
+        for addr in sorted(self._equ_names):
+            seen = []
+            for mode in _EQU_MODES:
+                name = self._equ_names[addr].get(mode)
+                if name and name not in seen:
+                    seen.append(name)
+                    rows.append({"asm": f"{name}: EQU 0x{addr:04X}"})
+        return rows
+
+    def _equ_text(self, addr, mode):
+        """`equ` で付けた名前を返します。無ければ None。
+
+        `mode` が示す向きの名前を優先し、無ければもう一方を使います。即値
+        （`LD hl, nn`）はアドレスを読むとも書くとも決まらないので `r` を先に見ます。
+
+        Args:
+            addr (int): 対象アドレス。
+            mode (str): "r"（読み） / "w"（書き） / "imm"（即値）。
+
+        Returns:
+            str | None: 名前。
+        """
+        names = self._equ_names.get(addr)
+        if not names:
+            return None
+        order = [mode, *_EQU_MODES] if mode in _EQU_MODES else list(_EQU_MODES)
+        for key in order:
+            if names.get(key):
+                return names[key]
+        return None
+
+    @property
+    def label_names(self):
+        """ラベルに添える名前 `{アドレス: 名前}`。
+
+        Returns:
+            dict: キーは int に解決済み。
+        """
+        return self._label_names
+
+    @label_names.setter
+    def label_names(self, value):
+        """名前を検証して設定します。
+
+        キーは `parse_entry()` で int に解決するので、`"NMI"` や `"0x0066"` も
+        書けます。名前は**トークナイザが 1 トークンとして扱える綴り**に限ります。
+        `,` や `(` を含む名前を通すと、出力は一見正しく見えるのに
+        **再アセンブルできない**状態になり、気づくのが遅れます。
+
+        Args:
+            value (dict | None): `{アドレス: 名前}`。
+
+        Raises:
+            ValueError: 名前に使えない文字が含まれる場合。
+        """
+        parsed = {}
+        for key, name in (value or {}).items():
+            if not isinstance(name, str) or not _RE_LABEL_NAME.match(name):
+                raise ValueError(
+                    f"Invalid label name for address {key}: {name!r} "
+                    f"(use letters, digits, '_' and '.')"
+                )
+            parsed[parse_entry(key)] = name
+        self._label_names = parsed
+
+    def _label_text(self, addr):
+        """アドレスに対応するラベル文字列を返します。
+
+        名前が登録されていれば `L_0066@NMI`、無ければ従来どおり `L_0066`。
+
+        **住所を名前に残すのが要点**です。効いている理由は 2 つあり、
+        重いのは後者です。
+
+        1. `disasm` が参照と定義を**レンダリング済みテキスト経由で**突き合わせる
+           （`_attach_labels` が `_re_label` で住所を読み戻す）
+        2. **名前の一意性を住所が保証している。** `label_names` は同じ名前を
+           別の番地に付けられてしまうが、`L_25CD@Str` と `L_3E89@Str` に
+           分かれるので衝突しない。住所を捨てると `Duplicate label definition`
+           で**再アセンブルできなくなる**（実際の設定で 51 件中 1 件が該当した）
+
+        `walk` と `_auto_entry` も `L_xxxx` から住所を読みます。**`L_xxxx` の形を
+        やめる案**（`L_0066` → `L_@NMI`）ならあちらが壊れます。一方**名前付きの
+        ときだけ接頭辞を落とす案**では、あちらに `@名前` が届かないので無関係です
+        （`build_addr_map()` / `sweep_from()` が作る `Disasm` は `label_names`
+        未設定）。受け側の `(?:@…)?` は防御的な記述です。
+
+        **案の範囲で拘束条件が変わります。** 後者は 2026-09-23 に測って見送り
+        ました（`docs/disasm-label-names.md` の追補）。
+
+        なお**アセンブラはこの名前を解釈しません**。`L_0066@NMI` は
+        不透明な識別子として扱われ、値は定義行の位置で決まります。手を入れて
+        番地がずれても名前が古くなるだけで、アセンブル結果は常に正しくなります。
+
+        Args:
+            addr (int): 対象アドレス。
+
+        Returns:
+            str: ラベル文字列（コロンは付けない）。
+        """
+        name = self.label_names.get(addr)
+        return f"L_{addr:04X}@{name}" if name else f"L_{addr:04X}"
+
+    @staticmethod
+    def _word_mode(asm):
+        """16 ビットオペランドが読みか書きか即値かを判定します。
+
+        `equ` で read と write に別の名前を付けられるようにするため、命令の形から
+        向きを読みます。22 命令は綺麗に割れます（書き 7・読み 7・即値 6）。
+
+            ['ld','(','0x{1}{0}',')',',','a']   -> "w"   (nn) が左辺
+            ['ld','a',',','(','0x{1}{0}',')']   -> "r"   (nn) が右辺
+            ['ld','hl',',','0x{1}{0}']          -> "imm" 括弧が無い
+
+        Args:
+            asm (list): 命令表の `asm` トークン列。
+
+        Returns:
+            str: "r" / "w" / "imm"。
+        """
+        i = asm.index("0x{1}{0}")
+        if asm[i - 1] != "(":
+            return "imm"
+        return "r" if "," in asm[:i] else "w"
+
+    def _word_operand(self, tmpl, lo, hi, mode="imm"):
+        """16 ビットのアドレスオペランドを描画します。
+
+        分岐命令以外（`LD de, nn` / `LD a, (nn)` など 22 命令）の 16 ビット即値は、
+        **既定では数値のまま**出します。アドレスとは限らないからです。`LD bc, 0x0100`
+        はカウンタの初期値かもしれず、`LD hl, 0x4000` は VRAM のベースかもしれない。
+        逆アセンブラには区別が付きません。
+
+        置き換えるのは `label_names` で**名前を付けたアドレスだけ**にしています。
+        名前を付けた時点で利用者が「ここは意味のある番地だ」と宣言しているので、
+        誤爆しません。`label_addresses`（`entry` 由来）は対象外です。そちらは
+        名前が無く、`entry` にありがちな `0x0000` まで巻き込むと
+        `LD hl, 0` のような定数まで置き換わってしまいます。
+
+        `equ` で付けた名前は**裸の名前**（`MirrorRam`）、`labels` で付けた名前は
+        `L_xxxx@名前` になります。前者は逆アセンブル範囲外の定数で定義行が
+        `EQU` として先頭に出るため、住所を名前に残す必要がありません。
+
+        Args:
+            tmpl (str): `_tmpl()` が返したテンプレート文字列。
+            lo (int): アドレス下位バイト。
+            hi (int): アドレス上位バイト。
+            mode (str): "r" / "w" / "imm"。`equ` の読み名・書き名の選択に使う。
+
+        Returns:
+            str: 描画後のアセンブリ文字列。
+        """
+        addr = (hi << 8) | lo
+        equ = self._equ_text(addr, mode)
+        if equ:
+            return tmpl.replace("0x{1}{0}", equ)
+        if addr in self.label_names:
+            return tmpl.replace("0x{1}{0}", self._label_text(addr))
+        return tmpl.replace("{0}", "{0:02X}").replace("{1}", "{1:02X}").format(lo, hi)
+
+    def _m1_decode(self, adr, raw_bytes):
+        """M1サイクル対象バイトにハンドラーを適用する。
+
+        Z80仕様: 2バイトオペコード (CB/DD/ED/FD で始まる命令) では
+        各オペコードバイトのフェッチ時に M1 が生成される。
+          - バイト0: 常にM1
+          - バイト1: バイト0がプレフィックス (DD/FD/ED/CB) の場合のみM1
+          - DDCB/FDCB (4バイト命令): バイト2(displacement)・バイト3(op)は
+            オペコードではなくオペランドのため M1 なし
+
+        Args:
+            adr (int): 命令の先頭アドレス。
+            raw_bytes (list[int]): メモリから読んだ生バイト列。
+
+        Returns:
+            list[int]: M1ハンドラー適用後のバイト列。
+        """
+        if not self.m1_handler or not raw_bytes:
+            return raw_bytes
+
+        result = list(raw_bytes)
+
+        # バイト0: 常にM1
+        result[0] = self.m1_handler(adr, result[0])
+        b0 = result[0]
+
+        if len(result) < 2:
+            return result
+
+        # バイト1: プレフィックスバイトの場合のみM1
+        if b0 in _Z80_PREFIXES:
+            result[1] = self.m1_handler(adr + 1, result[1])
+
+        return result
+
+    @property
+    def datamap(self):
+        """データマッププロパティ。
+
+        Returns:
+            list: データ範囲のリスト [[開始, 終了], ...]。
+        """
+        return self._datamap
+
+    @datamap.setter
+    def datamap(self, p):
+        """データマップセッター。
+
+        Args:
+            p (list): データ範囲のリスト。
+        """
+        self._datamap = p
+
+    @property
+    def valid_ranges(self):
+        """バイナリが実在するアドレス範囲 `[[開始, 終了], ...]`。
+
+        Returns:
+            list[list[int]] | None: 昇順・重なり無しに正規化した範囲。
+                None なら全域を走査する（従来どおり）。
+        """
+        return self._valid_ranges
+
+    @valid_ranges.setter
+    def valid_ranges(self, value):
+        """走査するアドレス範囲を設定します。**隙間は出力から消えます**。
+
+        `bins` で複数ファイルを別々の番地に置くと、ファイルとファイルの間に
+        **どのファイルも置かれていない番地**ができます。イメージ上はそこが
+        `0x00` で埋まっているので、指定しないと `nop` の列として逆アセンブル
+        されます。実在しないバイトを命令として読んでいるわけで、`walk` は
+        同じ隙間を最初から除外しています。ここを揃えるための設定です。
+
+        隙間を挟むたびに `org` を出し直すので、出力はそのまま再アセンブルできます。
+        命令の復号も区間の終端で止まるため、**隙間のバイトを巻き込んだ命令**が
+        できることもありません。
+
+        Args:
+            value (list | None): `[[開始, 終了], ...]`（両端含む）。None で全域。
+
+        Raises:
+            ValueError: 範囲の形式が不正、開始 > 終了、
+                0x0000-0xFFFF の外、または空リストの場合。
+        """
+        if value is None:
+            self._valid_ranges = None
+            return
+
+        ranges = []
+        for r in value:
+            try:
+                lo, hi = r
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Invalid valid_ranges entry: {r!r} (use [start, end])"
+                ) from None
+            if lo > hi:
+                raise ValueError(
+                    f"Invalid valid_ranges entry: start=0x{lo:04X} > end=0x{hi:04X}"
+                )
+            if lo < 0 or hi > 0xFFFF:
+                raise ValueError(
+                    f"valid_ranges entry outside the Z80 address space: "
+                    f"0x{lo:04X}-0x{hi:04X}"
+                )
+            ranges.append([lo, hi])
+
+        if not ranges:
+            raise ValueError(
+                "valid_ranges is empty (use None to disassemble the whole image)"
+            )
+
+        # 重なりと隣接をまとめる。隣接を繋ぐのは、続きのファイルの境目で
+        # `org` を出し直しても意味が無いため（出力が無駄に切れるだけ）。
+        ranges.sort()
+        merged = [ranges[0]]
+        for lo, hi in ranges[1:]:
+            if lo <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        self._valid_ranges = merged
+
+    def _segments(self, start, end):
+        """走査する区間を返します。`valid_ranges` の隙間はここで落ちます。
+
+        Args:
+            start (int): 逆アセンブル開始アドレス。
+            end (int): 逆アセンブル終了アドレス（両端含む）。
+
+        Returns:
+            list[list[int]]: `[[開始, 終了], ...]`。昇順・重なり無し。
+        """
+        if self._valid_ranges is None:
+            return [[start, end]]
+        return [
+            [max(lo, start), min(hi, end)]
+            for lo, hi in self._valid_ranges
+            if max(lo, start) <= min(hi, end)
+        ]
+
+    def op2asm(self, adr, opcode):
+        """オペコードをアセンブリ文字列に変換します。
+
+        Args:
+            adr (int): 現在のアドレス。
+            opcode (list): オペコードバイト列 (1〜4バイト)。
+                例: [0x3E, 0x10]  (LD A, 0x10)
+                    [0xDD, 0x21, 0x00, 0x10]  (LD IX, 0x1000)
+
+        Returns:
+            str: アセンブリ文字列、または一致しない場合はNone。
+                例: "LD A, 10"
+        """
+        # ------------------------------------------------------
+        # ここからメイン
+        # ------------------------------------------------------
+        if any(p[0] <= adr <= p[1] for p in self.datamap):
+            if len(opcode) != 1:
+                return None  # 1バイト単位で処理させるため他の長さは不一致扱い
+            return f"db 0x{opcode[0]:02X} ; [{self.cpu.strmap[opcode[0]]}]"
+
+        # オペコード検索
+        u = None
+        # DDCB/FDCB系の場合は (DD, CB, ext) をキーにする
+        if len(opcode) == 4 and opcode[0] in (0xDD, 0xFD) and opcode[1] == 0xCB:
+            key = (opcode[0], opcode[1], opcode[3])
+            u = self.cpu.op_map.get(key)
+
+        else:
+            # 2バイトキー検索
+            if len(opcode) >= 2:
+                key = tuple(opcode[:2])
+                u = self.cpu.op_map.get(key)
+
+            # 1バイトキー検索 (2バイトで見つからなかった場合)
+            if u is None and len(opcode) >= 1:
+                key = tuple(opcode[:1])
+                u = self.cpu.op_map.get(key)
+
+        if u is None:
+            return None
+
+        # ------------------------------------------------------
+        # オペコードのバイト数で分岐
+        # ------------------------------------------------------
+        if u["bytes"] != len(opcode):
+            return None
+        handler = self._dispatch.get(u["bytes"])
+        return handler(u, opcode, adr) if handler else None
+
+    def exec(self, start, images, size):
+        """逆アセンブルを実行します。
+
+        Args:
+            start (int): 開始アドレス。
+            images (list): バイナリイメージデータ (startアドレスからのデータ列)。
+            size (int): データサイズ。
+
+        Returns:
+            list: 逆アセンブルされた行のリスト。各要素は以下のいずれかの形式。
+                ORG行:  {"address": int, "asm": str}
+                命令行: {"address": int, "opcode": list, "asm": str}
+                ラベル付き命令行: {"address": int, "opcode": list, "asm": str, "label": str}
+                例: [{"address": 0x100, "asm": "org 0x0100"},
+                     {"address": 0x100, "opcode": [0x3E, 0x10], "asm": "LD A, 10"},
+                     {"address": 0x102, "opcode": [0xC3, 0x00, 0x01],
+                      "asm": "JP L_0100", "label": "L_0100:"}]
+        """
+        maxword = 0xFFFF
+
+        if size + start > maxword:
+            return []
+        if (start > maxword) or (start < 0):
+            return []
+
+        mem = [0] * 0x10000
+        mem[start : start + size] = images[:size]
+        end = start + size - 1
+
+        segments = self._segments(start, end)
+        if not segments:
+            raise ValueError(
+                f"valid_ranges does not overlap the disassembled range "
+                f"0x{start:04X}-0x{end:04X} (nothing to disassemble)"
+            )
+        self._check_label_names_in_range(segments)
+
+        # 区間ごとに `org` を出し直す。隙間を飛ばしたまま番地を進めないと、
+        # 再アセンブルしたときに後続が隙間の分だけ手前へ詰まる。
+        lst = []
+        for seg_start, seg_end in segments:
+            lst.append({"address": seg_start, "asm": f"org 0x{seg_start:04X}"})
+            lst += self._scan(mem, seg_start, seg_end)
+
+        dangling = self._attach_labels(lst)
+        # EQU 行は `_attach_labels` の後で足す。あちらは `item["address"]` で
+        # 索引を作るので、番地を持たない行を混ぜない。
+        return self._equ_rows() + self._dangling_rows(dangling) + lst
+
+    def _check_label_names_in_range(self, segments):
+        """`label_names` が逆アセンブル範囲内を指しているか検査します。
+
+        `labels` は「その行にラベルを貼る」機構なので、範囲外のアドレスには
+        **定義行を置く場所がありません**。それでも参照側は
+        `LD hl, L_8000@MirrorRam` と名前で出るため、出力は一見正しく見えるのに
+        `Undefined symbol` で再アセンブルできない状態になります。
+
+        RAM や I/O のように範囲外を指す定数は `equ` の仕事です。`valid_ranges`
+        の隙間（`bins` でどのファイルも置かれていない番地）も同じ扱いになります。
+
+        Args:
+            segments (list[list[int]]): 走査する区間 `[[開始, 終了], ...]`。
+
+        Raises:
+            ValueError: どの区間にも入らないアドレスに名前が付いている場合。
+        """
+        outside = sorted(
+            a
+            for a in self._label_names
+            if not any(lo <= a <= hi for lo, hi in segments)
+        )
+        if outside:
+            listed = ", ".join(f"0x{a:04X}" for a in outside)
+            where = ", ".join(f"0x{lo:04X}-0x{hi:04X}" for lo, hi in segments)
+            raise ValueError(
+                f"labels outside the disassembled range {where}: {listed} "
+                f"(use equ for RAM / I/O addresses)"
+            )
+
+    @staticmethod
+    def _dangling_rows(dangling):
+        """定義行を置けなかったラベルを `EQU` で定義する行を作ります。
+
+        `JP L_8000` のように**行の無い番地**を指す参照は前からありました。
+        RAM へ飛ぶもの、命令の途中を指すもの、そして `valid_ranges` の隙間を
+        指すものです。参照だけ出て定義が無いので、出力は
+        `Undefined symbol 'L_8000'` で再アセンブルできませんでした。
+
+        値が決まっている以上ここで `EQU` にしてしまえます。`equ` で利用者が
+        付けた名前とは別の行になりますが、pz80 は値の同じ `EQU` を別名で
+        定義できるので衝突しません。
+
+        Args:
+            dangling (dict): `{アドレス: ラベル名}`（コロンなし）。
+
+        Returns:
+            list[dict]: `{"asm": "L_8000: EQU 0x8000"}` の並び。アドレス順。
+        """
+        return [
+            {"asm": f"{name}: EQU 0x{addr:04X}"}
+            for addr, name in sorted(dangling.items())
+        ]
+
+    def _scan(self, mem, start, end):
+        """指定範囲を走査して命令行・データ行のリストを返します。
+
+        Args:
+            mem (list): 64KB のメモリイメージ。
+            start (int): 走査開始アドレス。
+            end (int): 走査終了アドレス（両端含む）。
+
+        Returns:
+            list: 命令行またはデータ行の辞書リスト。
+        """
+        lst = []
+        adr = start
+        while adr <= end:
+            # データ領域はオペコードフェッチではないため M1 復号せず生バイトで出力する
+            if any(r[0] <= adr <= r[1] for r in self.datamap):
+                raw = mem[adr]
+                lst.append(
+                    {
+                        "address": adr,
+                        "opcode": [raw],
+                        "asm": f"db 0x{raw:02X} ; [{self.cpu.strmap[raw]}]",
+                    }
+                )
+                adr += 1
+                continue
+
+            opcode, asm = self._decode_at(mem, adr, end)
+            if opcode is None:
+                # どの長さでもマッチしなかった場合、1バイトのデータとして処理
+                lst.append(
+                    {
+                        "address": adr,
+                        "opcode": [mem[adr]],
+                        "asm": f"db 0x{mem[adr]:02X} ; Invalid Opcode",
+                    }
+                )
+                adr += 1
+                continue
+
+            lst.append({"address": adr, "opcode": opcode, "asm": asm})
+            adr += len(opcode)
+        return lst
+
+    def _decode_at(self, mem, adr, end):
+        """1命令を復号します。最長の4バイトから順に1バイトまでマッチを試みます。
+
+        Args:
+            mem (list): 64KB のメモリイメージ。
+            adr (int): 復号するアドレス。
+            end (int): 走査範囲の終端（これを越えるバイトは読まない）。
+
+        Returns:
+            tuple[list | None, str | None]: (オペコード列, アセンブル文字列)。
+                どの長さでもマッチしなければ (None, None)。
+        """
+        for length in (4, 3, 2, 1):
+            if adr + length - 1 > end:
+                continue
+            opcode = self._m1_decode(adr, mem[adr : adr + length])
+            asm = self.op2asm(adr, opcode)
+            if asm:
+                return opcode, asm
+        return None, None
+
+    def _attach_labels(self, lst):
+        """逆アセンブル結果にラベルを付与します（この場で書き換えます）。
+
+        コード中の `L_xxxx` 参照を集め、対応するアドレスの行に `label` を付けます。
+        `label_addresses` と `label_names` で指定されたアドレスには、参照が無くても
+        ラベルを付けます（NMI などコード中から参照されないエントリポイント、および
+        `LD de, 0x0120` のようにジャンプ以外から指されるデータの先頭用）。
+
+        **定義側は参照側の綴りをそのまま使います。** 正規表現が `@名前` ごと
+        `group(1)` に含むので、参照が `CALL L_0980@DRAW` なら定義も
+        `L_0980@DRAW:` になります。ここが食い違うと出力が再アセンブルできません。
+
+        Args:
+            lst (list): 逆アセンブル結果のリスト。
+
+        Returns:
+            dict: 貼る行が無かったラベル `{アドレス: 名前}`（コロンなし）。
+                呼び出し側が `EQU` で定義する（`_dangling_rows()`）。
+        """
+        labels = {}
+        for p in lst:
+            m = self._re_label.search(p["asm"])
+            if m:
+                labels[int(m.group(2), 16)] = m.group(1) + ":"
+
+        # 強制ラベル付与アドレス（NMI などコード中に参照のないエントリ、
+        # および名前を付けたアドレス）
+        for addr in list(self.label_addresses) + list(self.label_names):
+            labels.setdefault(addr, self._label_text(addr) + ":")
+
+        # アドレス検索用のマップを作成 (高速化)
+        addr_map = {item["address"]: i for i, item in enumerate(lst)}
+        dangling = {}
+        for target_addr, label_str in labels.items():
+            if target_addr in addr_map:
+                lst[addr_map[target_addr]].update(label=label_str)
+            else:
+                dangling[target_addr] = label_str.removesuffix(":")
+        return dangling
+
+    def _tmpl(self, asm):
+        """アセンブルリストからアセンブル文字列生成
+
+        Args:
+            asm (list): ニーモニックとオペランドのトークンリスト。
+
+        Returns:
+            str: アセンブリ文字列。
+        """
+        mnemonic = asm[0].upper()
+        if len(asm) == 1:
+            return mnemonic
+
+        # カンマの隣にスペースを挿入して可読性を上げる
+        operands_str = "".join(asm[1:]).replace(",", ", ")
+        return f"{mnemonic} {operands_str}"
+
+    def _reladdr(self, x, y):
+        """相対アドレス計算
+
+        Args:
+            x (int): 相対オフセットバイト値。
+            y (int): 現在のアドレス（ジャンプ命令のアドレス）。
+
+        Returns:
+            int: 算出した絶対ジャンプ先アドレス。
+        """
+        maxword = 0xFFFF
+        return (((x - 0x100) if (x & 0x80) else (x & 0x7F)) + y + 2) & maxword
+
+    def _handle_1byte(self, u, opcode, adr):
+        """1バイト命令のアセンブリ文字列を生成します。
+
+        Args:
+            u (dict): オペコード情報辞書。
+            opcode (list): オペコードバイト列。
+            adr (int): 現在のアドレス。
+
+        Returns:
+            str: アセンブリ文字列。
+        """
+        return self._tmpl(u["asm"])
+
+    def _handle_2bytes(self, u, opcode, adr):
+        """2バイト命令のアセンブリ文字列を生成します。
+
+        Args:
+            u (dict): オペコード情報辞書。
+            opcode (list): オペコードバイト列。
+            adr (int): 現在のアドレス。
+
+        Returns:
+            str: アセンブリ文字列。
+        """
+        tmpl = self._tmpl(u["asm"])
+        if u.get("rel") is not None:
+            # ラベル文字列を先に組み立てて差し込む（format は掛けない）。
+            # 名前に `{` が含まれても壊れないようにするため。
+            return tmpl.replace(
+                "0x{0}", self._label_text(self._reladdr(opcode[1], adr))
+            )
+        return tmpl.replace("{0}", "{0:02X}").format(opcode[1])
+
+    def _handle_3bytes(self, u, opcode, adr):
+        """3バイト命令のアセンブリ文字列を生成します。
+
+        Args:
+            u (dict): オペコード情報辞書。
+            opcode (list): オペコードバイト列。
+            adr (int): 現在のアドレス。
+
+        Returns:
+            str or None: アセンブリ文字列。対応する命令がない場合はNone。
+        """
+        if u.get("jmp") is not None:
+            target = (opcode[2] << 8) | opcode[1]
+            return self._tmpl(u["asm"]).replace("0x{1}{0}", self._label_text(target))
+
+        op_type = u.get("type")
+        if op_type == "byte":
+            return self._tmpl(u["asm"]).replace("{0}", "{0:02X}").format(opcode[2])
+
+        if op_type == "word":
+            return self._word_operand(
+                self._tmpl(u["asm"]), opcode[1], opcode[2], self._word_mode(u["asm"])
+            )
+        return None
+
+    def _handle_4bytes(self, u, opcode, adr):
+        """4バイト命令のアセンブリ文字列を生成します。
+
+        Args:
+            u (dict): オペコード情報辞書。
+            opcode (list): オペコードバイト列。
+            adr (int): 現在のアドレス。
+
+        Returns:
+            str or None: アセンブリ文字列。対応する命令がない場合はNone。
+        """
+        if u.get("ext") is not None:
+            # ddcb / fdcb
+            return self._tmpl(u["asm"]).replace("{0}", "{0:02X}").format(opcode[2])
+
+        op_type = u.get("type")
+        if op_type == "word":
+            return self._word_operand(
+                self._tmpl(u["asm"]), opcode[2], opcode[3], self._word_mode(u["asm"])
+            )
+        if op_type == "byte":
+            # `ld (ix+d), n` の d と n。アドレスではないので置き換え対象外。
+            return (
+                self._tmpl(u["asm"])
+                .replace("{0}", "{0:02X}")
+                .replace("{1}", "{1:02X}")
+                .format(opcode[2], opcode[3])
+            )
+        return None
+
+
+def disassemble(
+    data: bytes,
+    start_address: int = 0,
+    data_regions: list[list[int]] | None = None,
+    m1_handler=None,
+    label_addresses: list[int] | None = None,
+    strmap: tuple | None = None,
+    label_names: dict | None = None,
+    equ_names: dict | None = None,
+    valid_ranges: list[list[int]] | None = None,
+) -> list[str]:
+    """Z80バイナリデータを逆アセンブルしてアセンブリコードのリストを返します。
+
+    Args:
+        data (bytes): 逆アセンブル対象のバイナリデータ
+        start_address (int, optional): 開始アドレス. Defaults to 0.
+        data_regions (list[list[int]] | None, optional): データ領域のリスト。
+            各要素は [開始アドレス, 終了アドレス]（両端含む）。
+            指定範囲は命令として解釈されず db として出力される。Defaults to None.
+        m1_handler (callable | None, optional): M1サイクル復号ハンドラー。
+            (address: int, byte: int) -> int の形式。Defaults to None.
+        label_addresses (list[int | str] | None, optional): 強制的にラベルを
+            付与するアドレスのリスト。コード中に参照のないエントリポイント（NMI 等）に
+            `L_xxxx:` ラベルを付けるのに使う。整数アドレスのほか、シンボル名
+            (RESET/RST0-7/IM1/NMI) や数値文字列 ("0x0066") も指定できる。
+            walk() の extra_entries と同じリストを渡すと一貫したラベル付けになる。
+            Defaults to None.
+        strmap (tuple | None, optional): キャラクターコード表（256要素のタプル）。
+            データ領域の `db 0xXX ; [文字]` コメントに使う文字を決める。
+            未指定時は標準ASCIIテーブル（0x20〜0x7E）を使用。Defaults to None.
+        label_names (dict | None, optional): `{アドレス: 名前}`。指定した
+            アドレスのラベルが `L_0066@NMI` の形になり、定義側にも参照側にも
+            同じ綴りで出ます。**住所は名前に残ります**（`walk` と `_auto_entry` が
+            ラベル名から住所を読み戻しているため）。名前を付けたアドレスには
+            参照が無くてもラベルが付き、そこを指す 16 ビットオペランド
+            （`LD de, nn` など分岐以外の 22 命令）もラベルに変わります。
+            `label_addresses` はこの置き換えの対象になりません。
+            **逆アセンブル範囲外のアドレスは指定できません**（定義行を置く場所が
+            無いため）。RAM / I/O は `equ_names` を使ってください。Defaults to None.
+        equ_names (dict | None, optional): `{アドレス: 名前}` または
+            `{アドレス: {"r": 読み名, "w": 書き名}}`。逆アセンブル範囲外の定数
+            （RAM・I/O・ハードウェアレジスタ）に名前を付けます。出力の先頭に
+            `MirrorRam: EQU 0x8000` を置き、参照側は**裸の名前**になります
+            （`L_xxxx@` は付きません）。read と write で役割が違うレジスタは
+            命令の形から向きを判定して名前を選びます。Defaults to None.
+        valid_ranges (list[list[int]] | None, optional): バイナリが実在する
+            アドレス範囲 `[[開始, 終了], ...]`（両端含む）。`bins` で複数ファイルを
+            別々の番地に置いたときの**隙間を出力から除外**します。未指定なら
+            全域を走査します（隙間の `0x00` が `nop` として出ます）。
+            `walk()` の同名引数と同じものを渡してください。Defaults to None.
+
+    Returns:
+        list[str]: アセンブリコードの各行のリスト
+    """
+    d = Disasm()
+    if data_regions:
+        d.datamap = data_regions
+    if valid_ranges:
+        d.valid_ranges = valid_ranges
+    if m1_handler:
+        d.m1_handler = m1_handler
+    if label_addresses:
+        d.label_addresses = [parse_entry(a) for a in label_addresses]
+    if strmap:
+        d.cpu.strmap = strmap
+    if label_names:
+        # キーの解決と名前の検証はセッターが行う
+        d.label_names = label_names
+    if equ_names:
+        d.equ_names = equ_names
+    result_data = d.exec(start_address, data, len(data))
+
+    lines = []
+    for p in result_data:
+        label = p.get("label", "")
+        if label:
+            lines.append(label)
+
+        asm_code = p.get("asm", "")
+        if asm_code:
+            # オペコードがある行（命令）はインデントする、ORGなどはインデントしない
+            indent = "    " if p.get("opcode") else ""
+            lines.append(f"{indent}{asm_code}")
+
+    return lines

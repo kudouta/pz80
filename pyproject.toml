@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pz80"
+dynamic = ["version"]
+description = 'Z80 assembler & disassembler'
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["z80", "assembler", "disassembler"]
+authors = [
+  { name = "kudouta", email = "65069371+kudouta@users.noreply.github.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = []
+
+[project.scripts]
+pz80 = "pz80.__main__:main"
+
+# 公開されている URL だけを載せる。本体（作業用）リポジトリは非公開なので指さない。
+# Issues を載せないのは意図的。公開リポジトリでは Issues を開けてあるが、対応を
+# 約束しない方針なので、窓口として掲げることはしない。README の「サポートについて」
+# に明記している。
+[project.urls]
+Homepage = "https://github.com/kudouta/pz80"
+Documentation = "https://github.com/kudouta/pz80#readme"
+
+[tool.hatch.version]
+path = "src/pz80/__about__.py"
+
+[tool.coverage.run]
+source_pkgs = ["pz80"]
+branch = true
+parallel = true
+omit = [
+  "src/pz80/__about__.py",
+]
+
+[tool.coverage.paths]
+pz80 = ["src/pz80", "*/pz80/src/pz80"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+# ruff 0.16 は Markdown 内の Python コードブロックも整形するが、
+# README の設定例は桁を揃えて可読性を上げているため対象外にする。
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "SIM", "UP", "Q", "TID"]
+ignore = [
+    "E501",    # Line too long
+    "SIM300",  # Yoda conditions
+    "T201",    # `print` found
+    "SIM102",  # Use a single `if` statement instead of nested `if` statements
+    "PERF401", #Use a list comprehension to create a transformed list
+]
+
+# パッケージ内 import は絶対形（`from pz80 import ...`）に統一する。
+# 相対形と混在していると、新しいモジュールを足す人がどちらに従うか判断できない。
+# 逆方向（相対に統一）を強制できるルールは ruff に無いため、絶対形を規約とする。
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pyyaml>=6.0",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = "src"
+testpaths = ["tests"]
+# カバレッジは既定では取らない（ローカル実行を速く保つ）。
+# 計測は CI と、明示的な `pytest --cov --cov-report=term-missing` で行う。
+# `--cov` に引数を渡さないこと。対象は上の source_pkgs で定義しており、
+# `--cov=pz80` と書くと二重指定になって module-not-measured の警告が出る。
+addopts = "-v"
