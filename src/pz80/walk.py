@@ -160,7 +160,7 @@ def sweep_from(data, addr, base=0, m1_handler=None):
     無言で追跡を打ち切り、その先がまるごとデータ扱いになっていました。
     linear sweep で境界を先に決めてしまうと recursive descent が入れない、という
     衝突です。分岐先から走査し直して境界を作るために使います。
-    （この形は `tests/test_walk.py` の 9 バイトのイメージで固定してあります）
+    （この形は 9 バイトの合成イメージでテストに固定してあります）
 
     Args:
         data (bytes | list[int]): 解析対象のバイナリデータ。

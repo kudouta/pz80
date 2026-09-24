@@ -11,7 +11,7 @@
 
 以前は「1文字トークンを `str.replace` で空白で囲んでから空白で分割する」方式で、
 それに伴う退避・復元（`__STRING_LITERAL_n__` / `__OPERATOR_n__`）を持っていた。
-経緯と、その方式が抱えていた問題は `docs/tokenizer-scan-migration.md` を参照。
+以前の方式が抱えていた問題は、移行時に別途まとめてある。
 """
 
 import re
