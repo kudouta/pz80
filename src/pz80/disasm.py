@@ -17,7 +17,21 @@ _RE_LABEL_NAME = re.compile(rf"^{_LABEL_NAME_CHARS}$")
 
 # `equ` の値に使える辞書キー。read と write で役割が違うハードウェアレジスタ
 # （`0xB000` が読むと IrqEnable、書くと NmiOn、など）を 1 エントリで書くため。
-_EQU_MODES = ("r", "w")
+# この順が `EQU` 定義行の出力順にもなる。
+_EQU_MODES = ("r", "w", "imm")
+
+# 名前を探す順。`imm` は `LD hl, nn` のようにアドレスを読むとも書くとも決まらない
+# 命令のためのキーで、**出力ラッチをまとめて初期化するループの先頭**がこの形に
+# なりやすい。その場合は書き名が正しいので、読み名を先に見る既定では外れる。
+#
+# 向きが決まっている `r` / `w` では `imm` を先に見ない。`imm` は「向きが分から
+# ないとき」の指定であって、分かっている命令の名前を上書きする意味はないため。
+# ただし最後の候補には置く。`imm` だけを書いた設定で 3 命令すべてに効かせたい。
+_EQU_FALLBACK = {
+    "r": ("r", "w", "imm"),
+    "w": ("w", "r", "imm"),
+    "imm": ("imm", "r", "w"),
+}
 
 
 class Disasm:
@@ -52,7 +66,8 @@ class Disasm:
         """`EQU` として名前を付けるアドレス `{アドレス: {"r": 名前, "w": 名前}}`。
 
         Returns:
-            dict: キーは int、値は `r` / `w` を持つ dict（片方だけのこともある）。
+            dict: キーは int、値は `r` / `w` / `imm` を持つ dict
+                （一部だけのこともある）。
         """
         return self._equ_names
 
@@ -66,13 +81,20 @@ class Disasm:
         参照側は**裸の名前**にします。住所を名前に残す必要はありません。
         住所は `EQU` の定義行にあり、それは手書きでも同じ場所だからです。
 
-        値は文字列か、`r` / `w` を持つ dict です。
+        値は文字列か、`r` / `w` / `imm` を持つ dict です。
 
             equ = {
                 0x8000: "MirrorRam",                      # 読み書き共通
                 0xB000: {"r": "IrqEnable", "w": "NmiOn"}, # 役割が違う
                 0xB801: {"w": "SndVolume"},               # 書き専用
             }
+
+        `imm` は `LD hl, nn` のように**アドレスを読むとも書くとも決まらない**
+        命令のための名前です。既定では読み名を先に見ますが、この形はアーケード
+        基板では**出力ラッチをまとめて初期化するループの先頭**になりやすく、
+        そこでは書き名が正しい名前になります。
+
+            0xB000: {"r": "Dsw", "w": "NmiOn", "imm": "NmiOn"}
 
         `dict(r=..., w=...)` でも同じものになりますが、利用者の設定ファイルを
         lint にかけると ruff の `C408`（`Unnecessary dict() call`）が出るので、
@@ -90,7 +112,7 @@ class Disasm:
             if not isinstance(names, dict) or not names:
                 raise ValueError(
                     f"Invalid equ entry for address {key}: {spec!r} "
-                    f'(use a name, or {{"r": ..., "w": ...}})'
+                    f'(use a name, or {{"r": ..., "w": ..., "imm": ...}})'
                 )
             unknown = set(names) - set(_EQU_MODES)
             if unknown:
@@ -110,8 +132,10 @@ class Disasm:
     def _equ_rows(self):
         """`EQU` 定義行を作ります（出力の先頭に置く）。
 
-        同じアドレスに読み名と書き名があるときは 2 行出します。pz80 では
-        値が同じ `EQU` を別名で定義できます（重複検査は名前に対して行うため）。
+        同じアドレスに違う名前があるだけ行を出します（`r` / `w` / `imm` で最大
+        3 行）。pz80 では値が同じ `EQU` を別名で定義できます（重複検査は名前に
+        対して行うため）。`imm` に `w` と同じ名前を書くのが普通の使い方なので、
+        その場合は 1 行にまとまります。
 
         Returns:
             list[dict]: `{"asm": "NAME: EQU 0xXXXX"}` の並び。アドレス順。
@@ -129,8 +153,9 @@ class Disasm:
     def _equ_text(self, addr, mode):
         """`equ` で付けた名前を返します。無ければ None。
 
-        `mode` が示す向きの名前を優先し、無ければもう一方を使います。即値
-        （`LD hl, nn`）はアドレスを読むとも書くとも決まらないので `r` を先に見ます。
+        探す順は `_EQU_FALLBACK` にあります。`mode` が示す向きの名前を優先し、
+        無ければ他を使います。即値（`LD hl, nn`）はアドレスを読むとも書くとも
+        決まらないので、専用の `imm` があればそれを最優先します。
 
         Args:
             addr (int): 対象アドレス。
@@ -142,8 +167,7 @@ class Disasm:
         names = self._equ_names.get(addr)
         if not names:
             return None
-        order = [mode, *_EQU_MODES] if mode in _EQU_MODES else list(_EQU_MODES)
-        for key in order:
+        for key in _EQU_FALLBACK.get(mode, _EQU_MODES):
             if names.get(key):
                 return names[key]
         return None
