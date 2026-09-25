@@ -127,6 +127,8 @@ class CliConfig:
         datamap (list | None): データ領域（disasm のみ）。
         strmap (tuple | None): キャラクターコード表（disasm のみ）。
         label_names (dict | None): `{アドレス: 名前}`（disasm のみ）。
+        raw_operand (list | None): 16 ビットオペランドを数値のまま出す
+            命令の番地（disasm のみ）。
             ラベルが `L_0066@NMI` の形になる。
         equ_names (dict | None): `{アドレス: 名前 | {"r": ..., "w": ...}}`（disasm のみ）。
             逆アセンブル範囲外の定数に `EQU` で名前を付ける。
@@ -141,6 +143,7 @@ class CliConfig:
     datamap: list | None = None
     strmap: tuple | None = None
     label_names: dict | None = None
+    raw_operand: list | None = None
     equ_names: dict | None = None
     output: Callable | None = None
 
@@ -188,6 +191,8 @@ def resolve_config(args):
                 cfg.label_names = dict(m.labels)
             if hasattr(m, "equ"):
                 cfg.equ_names = dict(m.equ)
+            if hasattr(m, "raw_operand"):
+                cfg.raw_operand = list(m.raw_operand)
             if hasattr(m, "output"):
                 cfg.output = m.output
 
@@ -387,6 +392,8 @@ def command_disasm(args):
         ope.label_names = cfg.label_names
     if cfg.equ_names is not None:
         ope.equ_names = cfg.equ_names
+    if cfg.raw_operand is not None:
+        ope.raw_operand = cfg.raw_operand
 
     if cfg.valid_ranges is not None:
         # bins の隙間は walk と同じく出力から除外する。実在しないバイトを

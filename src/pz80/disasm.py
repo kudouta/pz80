@@ -33,6 +33,10 @@ _EQU_FALLBACK = {
     "imm": ("imm", "r", "w"),
 }
 
+# `labels` の値に辞書を書くときのキー。`imm` を False にすると、その番地は
+# 16 ビット即値（`LD rr, nn`）の置き換えに使われなくなる。
+_LABEL_KEYS = ("name", "imm")
+
 
 class Disasm:
     """Z80逆アセンブラクラス"""
@@ -59,6 +63,8 @@ class Disasm:
         self.m1_handler = None  # M1サイクルハンドラー (address, byte) -> byte
         self.label_addresses = []  # 強制的にラベルを付与するアドレスのリスト
         self._label_names = {}
+        self._label_no_imm = set()  # 16 ビット即値の置き換えに使わない番地
+        self._raw_operand = set()  # オペランドを数値のまま出す命令の番地
         self._equ_names = {}
 
     @property
@@ -190,21 +196,100 @@ class Disasm:
         `,` や `(` を含む名前を通すと、出力は一見正しく見えるのに
         **再アセンブルできない**状態になり、気づくのが遅れます。
 
+        値は文字列か、`name` / `imm` を持つ dict です。
+
+            labels = {
+                0x1200: "MsgTable",                          # 今までどおり
+                0x0020: {"name": "Rst20", "imm": False},     # 即値には使わない
+            }
+
+        **`imm` を False にすると、16 ビット即値（`LD rr, nn`）の置き換えから
+        外れます。** 間接参照（`LD a, (nn)`）と分岐（`JP` / `CALL` / `JR` /
+        `DJNZ`）は今までどおり名前になり、その番地の定義行にもラベルが付きます。
+
+        RST ベクタのような**小さい番地**に名前を付けるときに要ります。`0x0008`
+        や `0x0020` は転送バイト数や構造体の間隔としてもよく使われる値なので、
+        名前を付けると定数まで置き換わります。`LD de, L_0020@Rst20` は
+        「ルーチンの番地を DE に入れている」と読めてしまい、実際は間隔 0x20 です。
+
         Args:
-            value (dict | None): `{アドレス: 名前}`。
+            value (dict | None): `{アドレス: 名前 | dict}`。
 
         Raises:
-            ValueError: 名前に使えない文字が含まれる場合。
+            ValueError: 名前に使えない文字、未知のキー、`name` が無い dict、
+                `imm` が bool でない場合。
         """
         parsed = {}
-        for key, name in (value or {}).items():
+        no_imm = set()
+        for key, spec in (value or {}).items():
+            if isinstance(spec, dict):
+                unknown = set(spec) - set(_LABEL_KEYS)
+                if unknown:
+                    raise ValueError(
+                        f"Invalid label keys for address {key}: {sorted(unknown)} "
+                        f"(use {' / '.join(_LABEL_KEYS)})"
+                    )
+                if "name" not in spec:
+                    raise ValueError(
+                        f'Invalid label entry for address {key}: needs "name"'
+                    )
+                name = spec["name"]
+                use_imm = spec.get("imm", True)
+                # bool に限る。`"imm": "False"` のような書き間違いは真になって
+                # しまい、指定したつもりで効かない状態に気づけない。
+                if not isinstance(use_imm, bool):
+                    raise ValueError(
+                        f"Invalid label imm for address {key}: {use_imm!r} "
+                        f"(use True or False)"
+                    )
+            else:
+                name, use_imm = spec, True
             if not isinstance(name, str) or not _RE_LABEL_NAME.match(name):
                 raise ValueError(
                     f"Invalid label name for address {key}: {name!r} "
                     f"(use letters, digits, '_' and '.')"
                 )
-            parsed[parse_entry(key)] = name
+            addr = parse_entry(key)
+            parsed[addr] = name
+            if not use_imm:
+                no_imm.add(addr)
         self._label_names = parsed
+        self._label_no_imm = no_imm
+
+    @property
+    def label_no_imm(self):
+        """16 ビット即値の置き換えに使わない番地の集合。
+
+        `label_names` の値に `{"name": …, "imm": False}` と書いた番地が入ります。
+        `label_names` は `{アドレス: 名前}` の形を保つので、旗はここに分けて
+        持っています。
+
+        Returns:
+            set[int]: 該当する番地。
+        """
+        return self._label_no_imm
+
+    @property
+    def raw_operand(self):
+        """16 ビットオペランドを数値のまま出す**命令の番地**の集合。
+
+        `label_names` と `equ_names` の両方に対して効きます。同じ値が、ある場所
+        では番地・別の場所では定数、という混在を 1 か所ずつ潰すためのものです。
+        `label_no_imm` は番地ごと、こちらは**命令ごと**の指定になります。
+
+        Returns:
+            set[int]: 該当する命令の番地。
+        """
+        return self._raw_operand
+
+    @raw_operand.setter
+    def raw_operand(self, value):
+        """命令の番地を検証して設定します。
+
+        Args:
+            value (iterable | None): 命令の番地。`parse_entry()` が解釈できる形。
+        """
+        self._raw_operand = {parse_entry(a) for a in (value or ())}
 
     def _label_text(self, addr):
         """アドレスに対応するラベル文字列を返します。
@@ -265,7 +350,7 @@ class Disasm:
             return "imm"
         return "r" if "," in asm[:i] else "w"
 
-    def _word_operand(self, tmpl, lo, hi, mode="imm"):
+    def _word_operand(self, tmpl, lo, hi, mode="imm", site=None):
         """16 ビットのアドレスオペランドを描画します。
 
         分岐命令以外（`LD de, nn` / `LD a, (nn)` など 22 命令）の 16 ビット即値は、
@@ -283,22 +368,37 @@ class Disasm:
         `L_xxxx@名前` になります。前者は逆アセンブル範囲外の定数で定義行が
         `EQU` として先頭に出るため、住所を名前に残す必要がありません。
 
+        **名前を付けた番地でも、即値では使わない指定ができます**
+        （`labels` の `{"name": …, "imm": False}`）。RST ベクタのような小さい番地に
+        名前を付けると、同じ値の定数まで置き換わるためです。間接参照と分岐は
+        オペランドが確実に番地なので、この指定でも名前のままにします。
+
+        `raw_operand` に**命令の番地**を書くと、その命令だけ数値のまま出します。
+        同じ値が、ある場所では番地・別の場所では定数、という混在を潰すためです。
+
         Args:
             tmpl (str): `_tmpl()` が返したテンプレート文字列。
             lo (int): アドレス下位バイト。
             hi (int): アドレス上位バイト。
             mode (str): "r" / "w" / "imm"。`equ` の読み名・書き名の選択に使う。
+            site (int | None): この命令の番地。`raw_operand` の判定に使う。
 
         Returns:
             str: 描画後のアセンブリ文字列。
         """
+        raw = tmpl.replace("{0}", "{0:02X}").replace("{1}", "{1:02X}").format(lo, hi)
+        if site is not None and site in self._raw_operand:
+            return raw
+
         addr = (hi << 8) | lo
         equ = self._equ_text(addr, mode)
         if equ:
             return tmpl.replace("0x{1}{0}", equ)
         if addr in self.label_names:
+            if mode == "imm" and addr in self._label_no_imm:
+                return raw
             return tmpl.replace("0x{1}{0}", self._label_text(addr))
-        return tmpl.replace("{0}", "{0:02X}").replace("{1}", "{1:02X}").format(lo, hi)
+        return raw
 
     def _m1_decode(self, adr, raw_bytes):
         """M1サイクル対象バイトにハンドラーを適用する。
@@ -783,7 +883,11 @@ class Disasm:
 
         if op_type == "word":
             return self._word_operand(
-                self._tmpl(u["asm"]), opcode[1], opcode[2], self._word_mode(u["asm"])
+                self._tmpl(u["asm"]),
+                opcode[1],
+                opcode[2],
+                self._word_mode(u["asm"]),
+                site=adr,
             )
         return None
 
@@ -805,7 +909,11 @@ class Disasm:
         op_type = u.get("type")
         if op_type == "word":
             return self._word_operand(
-                self._tmpl(u["asm"]), opcode[2], opcode[3], self._word_mode(u["asm"])
+                self._tmpl(u["asm"]),
+                opcode[2],
+                opcode[3],
+                self._word_mode(u["asm"]),
+                site=adr,
             )
         if op_type == "byte":
             # `ld (ix+d), n` の d と n。アドレスではないので置き換え対象外。
@@ -828,6 +936,7 @@ def disassemble(
     label_names: dict | None = None,
     equ_names: dict | None = None,
     valid_ranges: list[list[int]] | None = None,
+    raw_operand: list[int] | None = None,
 ) -> list[str]:
     """Z80バイナリデータを逆アセンブルしてアセンブリコードのリストを返します。
 
@@ -855,6 +964,9 @@ def disassemble(
             参照が無くてもラベルが付き、そこを指す 16 ビットオペランド
             （`LD de, nn` など分岐以外の 22 命令）もラベルに変わります。
             `label_addresses` はこの置き換えの対象になりません。
+            値に `{"name": 名前, "imm": False}` と書くと、**その番地は 16 ビット
+            即値の置き換えから外れます**（間接参照と分岐は名前のまま）。RST ベクタ
+            のような小さい番地に名前を付けるときに要ります。
             **逆アセンブル範囲外のアドレスは指定できません**（定義行を置く場所が
             無いため）。RAM / I/O は `equ_names` を使ってください。Defaults to None.
         equ_names (dict | None, optional): `{アドレス: 名前}` または
@@ -868,6 +980,11 @@ def disassemble(
             別々の番地に置いたときの**隙間を出力から除外**します。未指定なら
             全域を走査します（隙間の `0x00` が `nop` として出ます）。
             `walk()` の同名引数と同じものを渡してください。Defaults to None.
+        raw_operand (list[int] | None, optional): 16 ビットオペランドを数値のまま
+            出す**命令の番地**。`label_names` と `equ_names` の両方に効きます。
+            同じ値が、ある場所では番地・別の場所では定数、という混在を 1 か所ずつ
+            潰すためのものです。`labels` の `imm` は番地ごと、こちらは命令ごとの
+            指定になります。Defaults to None.
 
     Returns:
         list[str]: アセンブリコードの各行のリスト
@@ -888,6 +1005,8 @@ def disassemble(
         d.label_names = label_names
     if equ_names:
         d.equ_names = equ_names
+    if raw_operand:
+        d.raw_operand = raw_operand
     result_data = d.exec(start_address, data, len(data))
 
     lines = []
