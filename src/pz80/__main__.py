@@ -486,7 +486,7 @@ def _auto_detect_entries(cfg, seed_entries):
         print(f"# auto-entry: {f.format()}")
     entry_opts = " ".join(f"-e 0x{e:04X}" for e in sorted(found))
     print(f"# auto-entry: entry = {entry_opts}")
-    return sorted(found)
+    return sorted(found), set(ae.no_fallthrough)
 
 
 def command_walk(args):
@@ -500,8 +500,9 @@ def command_walk(args):
     valid_ranges, m1_handler = cfg.valid_ranges, cfg.m1_handler
     extra_entries = cfg.entries
 
+    stop_after = None
     if getattr(args, "auto_entry", False):
-        extra_entries = _auto_detect_entries(cfg, extra_entries)
+        extra_entries, stop_after = _auto_detect_entries(cfg, extra_entries)
 
     unresolved = set()
     try:
@@ -512,6 +513,7 @@ def command_walk(args):
             valid_ranges=valid_ranges,
             m1_handler=m1_handler,
             unresolved=unresolved,
+            stop_after=stop_after,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

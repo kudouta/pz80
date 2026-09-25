@@ -34,7 +34,9 @@ RE_ST_HL_IND = re.compile(rf"^LD\s+\({ADDR16}\),\s*hl$", re.I)
 RE_LD_A_IMM = re.compile(r"^LD\s+a,\s*0x([0-9A-Fa-f]{2})$", re.I)
 RE_ST_A_IND = re.compile(rf"^LD\s+\({ADDR16}\),\s*a$", re.I)
 RE_JP_IND = re.compile(r"^JP\s+\((hl|ix|iy)\)$", re.I)
+RE_POP_PTR = re.compile(r"^POP\s+(hl|ix|iy)$", re.I)
 RE_RST = re.compile(r"^RST\s+(0x[0-9A-Fa-f]+|\d+)$", re.I)
+RE_LD_HL_IMM = re.compile(r"^LD\s+hl,\s*0x([0-9A-Fa-f]{4})$", re.I)
 # `@名前` は省略可。disasm が label_names でラベルに名前を添えた出力も読めるようにする。
 RE_CALL = re.compile(r"^CALL\s+(?:(\w+),\s*)?L_([0-9A-Fa-f]{4})(?:@[\w.]+)?$", re.I)
 
@@ -51,6 +53,12 @@ BACK_WINDOW = 24
 MIN_TABLE = 2
 # コードらしさ判定で追う命令数
 PLAUSIBLE_DEPTH = 8
+# RST のベクタ先を「テーブル分岐か」判定するときに追う命令数。実物は
+# `ADD a,a / POP hl / LD e,a / LD d,0 / ADD hl,de / LD e,(hl) / INC hl /
+# LD d,(hl) / EX de,hl / JP (hl)` の 10 命令なので、少し余裕を持たせてある。
+RST_BODY_WINDOW = 16
+# `push-return` で「積んだ値が積まれたままか」を見る命令数
+PUSH_RETURN_WINDOW = 8
 
 
 class Finding:
@@ -74,9 +82,18 @@ class Finding:
         self.note = note
 
     def format(self):
-        """1 行の説明文を返す。"""
+        """1 行の説明文を返す。
+
+        テーブルが無い定型句（`rst-vector` / `sp-ret`）でも、分岐先が分かって
+        いれば `-> ...` を出します。以前は `note` だけを見ていたため
+        `rst-vector` の行が `@0x0006` で終わり、ベクタ番地が読めませんでした。
+        """
         if self.base is None:
-            return f"[{self.pattern}] @0x{self.site:04X} {self.note}"
+            targets = " ".join(f"0x{t:04X}" for t in self.targets)
+            tail = " ".join(
+                x for x in (f"-> {targets}" if targets else "", self.note) if x
+            )
+            return f"[{self.pattern}] @0x{self.site:04X} {tail}"
         targets = " ".join(f"0x{t:04X}" for t in self.targets)
         return (
             f"[{self.pattern}] @0x{self.site:04X} table=0x{self.base:04X} "
@@ -107,6 +124,11 @@ class AutoEntry:
         self.amap = build_addr_map(self.data, start, m1_handler, valid_ranges)
         self.order = sorted(self.amap)
         self.index = {a: i for i, a in enumerate(self.order)}
+
+        # 直後へ戻らないと分かった命令の番地（RST 直後にテーブルを埋め込む形）。
+        # `trace()` に渡して、テーブルのバイトをコードにしないために使う。
+        # `run()` のあと呼び出し側が読む（`__main__` が `walk()` へ渡す）。
+        self.no_fallthrough = set()
 
     # ------------------------------------------------------------------ 基本部品
 
@@ -149,15 +171,43 @@ class AutoEntry:
         アドレス順の索引を作り直します。
         """
         before = len(self.amap)
-        result = trace(self.amap, entries, resweep=self.resweep)
+        result = trace(
+            self.amap, entries, resweep=self.resweep, stop_after=self.no_fallthrough
+        )
         if len(self.amap) != before:
             self.order = sorted(self.amap)
             self.index = {a: i for i, a in enumerate(self.order)}
         return result
 
+    def _ensure_mapped(self, addr):
+        """`amap` に無い番地なら、そこから走査し直して埋める。
+
+        **先頭からの走査が作った命令境界に、分岐先が乗るとは限りません**
+        （`walk.sweep_from()`）。`trace()` は `resweep` でこれを回避しますが、
+        テーブルの読み出しは `scan()` の中で `amap` を直接引くため、同じ手当てが
+        必要です。無いまま `False` を返すと、**実在するテーブルが不成立になります**。
+
+        Args:
+            addr (int): 対象アドレス。
+
+        Returns:
+            bool: `amap` に載っていれば True。
+        """
+        if addr in self.amap:
+            return True
+        if not self.in_rom(addr):
+            return False
+        before = len(self.amap)
+        for a, p in self.resweep(addr).items():
+            self.amap.setdefault(a, p)
+        if len(self.amap) != before:
+            self.order = sorted(self.amap)
+            self.index = {a: i for i, a in enumerate(self.order)}
+        return addr in self.amap
+
     def plausible(self, addr, depth=PLAUSIBLE_DEPTH):
         """addr からコードとして素直に復号できるかを返す。"""
-        if not self.in_rom(addr) or addr not in self.amap:
+        if not self.in_rom(addr) or not self._ensure_mapped(addr):
             return False
         a = addr
         for _ in range(depth):
@@ -209,15 +259,38 @@ class AutoEntry:
         # dw LABEL の並び
         words = []
         a = base
+        # テーブルより後ろを指す分岐先の最小値。そこに達したらテーブルの終わり。
+        # **テーブルは自分の分岐先に食い込めない。** ハンドラがテーブルの直後に
+        # 並ぶ配置（RST 直後に埋め込むテーブルで多い）では、この規則が無いと
+        # ハンドラのバイトを語として読み続ける。
+        #
+        # **前を指す分岐先を混ぜてはいけない。** 混ぜると `a >= forward_min` が
+        # 初回から成立してテーブルを 1 件で打ち切る。
+        forward_min = None
         while self.in_rom(a + 1):
+            if forward_min is not None and a >= forward_min:
+                break
             w = self.byte(a) | self.byte(a + 1) << 8
-            if w in words:
-                break  # 同じ語の反復は 0 埋め等のデータとみなす
+            if w == 0:
+                # 0x0000 はリセットベクタなので `plausible()` を通ってしまうが、
+                # ディスパッチテーブルの要素としては詰め物である。テーブルの
+                # 末尾に 0 埋めが続く配置で、それを要素として数えてしまう。
+                break
+            # 直前と同じ語なら打ち切る（0 埋めなどのデータ）。
+            #
+            # **離れた位置での重複は許す。** ディスパッチテーブルでは同じハンドラを
+            # 複数の添字に割り当てるのが普通である。以前は `w in words` で
+            # 「一度でも出た語」を打ち切っていたため、19 件のテーブルが 9 件目
+            # （3 件目と同じハンドラ）で切れていた。
+            if words and w == words[-1]:
+                break
             if not self.plausible(w):
                 break
             if not self._consistent(w, code, heads):
                 break
             words.append(w)
+            if w > base and (forward_min is None or w < forward_min):
+                forward_min = w
             a += 2
         return (words, 2) if len(words) >= MIN_TABLE else ([], 0)
 
@@ -306,6 +379,8 @@ class AutoEntry:
         findings += self._p_push_ret(code, heads)
         findings += self._p_sp_ret(code, heads)
         findings += self._p_inline_after_call(code, heads)
+        findings += self._p_inline_after_rst(code, heads)
+        findings += self._p_push_return(code, heads)
         findings += self._p_rst(code, heads)
         return findings
 
@@ -411,6 +486,132 @@ class AutoEntry:
             out += self._emit("inline-after-call", a, {base}, code, heads)
         return out
 
+    def _rst_dispatches_via_table(self, vec, heads):
+        """RST のベクタ先が「戻り番地を取り出してテーブルで飛ぶ」形かを返す。
+
+        `inline-after-call` と同じ判定をベクタ先に当てはめたもの。`POP hl`
+        （`ix` / `iy` も可）で戻り番地を取り、`JP (hl)` に至れば、その RST の
+        直後がテーブル本体になる。
+
+        Args:
+            vec (int): RST のベクタアドレス。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            bool: テーブル分岐なら True。
+        """
+        a = vec
+        popped = False
+        for _ in range(RST_BODY_WINDOW):
+            p = self.amap.get(a)
+            if p is None or a not in heads:
+                return False
+            if RE_POP_PTR.match(p["asm"].strip()):
+                popped = True
+            if RE_JP_IND.match(p["asm"].strip()):
+                return popped
+            continues, _target = classify_instruction(p["asm"])
+            if not continues:
+                return False
+            a += len(p["opcode"])
+        return False
+
+    def _p_inline_after_rst(self, code, heads):
+        """RST 直後にテーブルを埋め込む形式。
+
+        `classify_instruction()` は RST を「呼んで次の命令へ戻る」ものとして
+        扱うため、直後のテーブルを命令として読んでしまう。ベクタ先が戻り番地を
+        取り出す形なら戻ってこないので、`no_fallthrough` に site を積んで
+        追跡側に伝える（`trace()` の `stop_after`）。これでテーブルのバイトは
+        コードにならず、自然にデータへ落ちる。
+        """
+        out = []
+        verdict = {}
+        for a in sorted(heads):
+            m = RE_RST.match(self.amap[a]["asm"].strip())
+            if not m:
+                continue
+            vec = int(m.group(1), 0)
+            if vec not in verdict:
+                verdict[vec] = self.in_rom(vec) and self._rst_dispatches_via_table(
+                    vec, heads
+                )
+            if not verdict[vec]:
+                continue
+            # **テーブルが読めたかに関わらず積む。** 戻ってこないことはベクタ先の
+            # 形だけで決まる。成否に連動させると循環する: テーブルを読むには
+            # 直後のバイトがコードでない必要があり、コードでなくするには
+            # 「戻らない」と決める必要がある。実際にこれで 2 つのテーブルが
+            # 読めなかった（先頭の語が、命令として読まれたバイトの途中を指す）。
+            self.no_fallthrough.add(a)
+            base = a + len(self.amap[a]["opcode"])
+            out += self._emit("inline-after-rst", a, {base}, code, heads)
+        return out
+
+    def _p_push_return(self, code, heads):
+        """`LD hl, nn` の直後に `PUSH hl` がある形（戻り先をスタックへ積む）。
+
+        `push-ret`（`PUSH hl` の直後に `RET`）とは別の形で、積んでから途中に
+        分岐を挟み、あとで `RET` で戻る。積んだ `nn` がそのまま戻り先になる。
+
+        **積んだ値がアドレスとは限りません。** 実 ROM には
+
+            LD hl, 0x0100 / PUSH hl / POP hl / DEC hl / LD a,h / OR l / JP nz,…
+
+        という遅延ループがあり、この 0x0100 は**回数**です。`plausible()` だけでは
+        通ってしまい（コードとして素直に読めてしまう）、実 ROM 2 本で誤検出
+        しました。すぐ `POP` で戻しているかを見て弾きます。
+        **積んだ値を戻すなら、それは戻り先ではない。**
+
+        それでも誤検出の余地は残るため、根拠を `# auto-entry:` の行に出して
+        利用者が判断できるようにしている。
+        """
+        out = []
+        for a in sorted(heads):
+            m = RE_LD_HL_IMM.match(self.amap[a]["asm"].strip())
+            if not m:
+                continue
+            nxt = a + len(self.amap[a]["opcode"])
+            p = self.amap.get(nxt)
+            if p is None or nxt not in heads:
+                continue
+            if p["asm"].strip().upper() != "PUSH HL":
+                continue
+            target = int(m.group(1), 16)
+            if not (self.in_rom(target) and self.plausible(target)):
+                continue
+            if not self._pushed_value_is_kept(nxt + len(p["opcode"]), heads):
+                continue
+            out.append(Finding("push-return", a, targets=[target]))
+        return out
+
+    def _pushed_value_is_kept(self, after, heads):
+        """積んだ値が積まれたまま残るか（すぐ `POP` で戻されないか）を返す。
+
+        `POP` に当たったら False。無条件分岐・`RET`・テーブル分岐（`RST` を
+        `no_fallthrough` に積んだもの）まで届いたら True。**戻り先として積んだなら、
+        その先の `RET` で使われるので自分では戻さない**、という見分け方である。
+
+        Args:
+            after (int): `PUSH` の直後のアドレス。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            bool: 積まれたままなら True。
+        """
+        a = after
+        for _ in range(PUSH_RETURN_WINDOW):
+            p = self.amap.get(a)
+            if p is None or a not in heads:
+                return False
+            if p["asm"].strip().upper().startswith("POP"):
+                return False
+            continues, _target = classify_instruction(p["asm"])
+            if not continues or a in self.no_fallthrough:
+                return True
+            a += len(p["opcode"])
+        return True
+
     def _p_rst(self, code, heads):
         """到達コード中に RST n が実在する場合のみベクタを採用する。"""
         out = []
@@ -453,11 +654,16 @@ class AutoEntry:
         findings = {}
         for _ in range(max_iter):
             code, heads = self.trace(entries)
+            # 次の `trace()` の結果を変えるものは 2 つある。エントリが増えたか、
+            # **`no_fallthrough` が増えたか**。後者を見ないと 1 回早く収束する。
+            # 「戻らない RST」が増えると直後のバイトがコードでなくなり、そこで
+            # 初めて読めるテーブルがある。実 ROM でテーブル 2 個を落としていた。
+            stops = len(self.no_fallthrough)
             new = set()
             for f in self.scan(code, heads):
                 findings[(f.pattern, f.site, f.base)] = f
                 new |= set(f.targets)
-            if new <= entries:
+            if new <= entries and len(self.no_fallthrough) == stops:
                 break
             entries |= new
 

@@ -182,7 +182,7 @@ def sweep_from(data, addr, base=0, m1_handler=None):
     return {p["address"]: p for p in out if p.get("opcode")}
 
 
-def trace(addr_map, entries, resweep=None, unresolved=None):
+def trace(addr_map, entries, resweep=None, unresolved=None, stop_after=None):
     """エントリポイントからCFGをトレースする。
 
     Args:
@@ -194,6 +194,11 @@ def trace(addr_map, entries, resweep=None, unresolved=None):
             止まります**。
         unresolved (set | None): 復号できなかった分岐先を書き出す集合。
             イメージの外（RAM・I/O）へ飛ぶ場合はここに残ります。
+        stop_after (set[int] | None): **直後の命令へ進まない**アドレスの集合。
+            分岐先は従来どおり追います。`RST` の直後にジャンプテーブルを
+            埋め込む形（呼ばれた側が戻り番地を取り出して飛ぶ）で使います。
+            命令の形だけでは「戻ってこない」と分からないので、外から教えます。
+            渡すとテーブルのバイトがコードにならず、そのままデータへ落ちます。
 
     Returns:
         tuple[set[int], set[int]]: (到達したバイトの集合, 命令先頭アドレスの集合)。
@@ -240,6 +245,9 @@ def trace(addr_map, entries, resweep=None, unresolved=None):
             if branch_target is not None:
                 to_visit.add(branch_target)
 
+            if stop_after and addr in stop_after:
+                continues = False
+
             if not continues:
                 break
 
@@ -255,6 +263,7 @@ def walk(
     valid_ranges=None,
     m1_handler=None,
     unresolved=None,
+    stop_after=None,
 ):
     """CFGトレースによりデータ領域を検出する。
 
@@ -278,6 +287,9 @@ def walk(
             **正常なら空になる。** 手書きの Z80 コードは ROM の外へ分岐しない。
             実 ROM 3 本で測っていずれも 0 件だった。1 件でも出たら
             **`bins` の指定漏れか、ROM ファイルの欠落を疑う**。
+        stop_after (set[int] | None): **直後の命令へ進まない**アドレスの集合。
+            `RST` の直後にジャンプテーブルを埋め込む形で使う。詳細は `trace()`。
+            `AutoEntry.no_fallthrough` をそのまま渡せる。
 
     Returns:
         list[list[int]]: データ領域の [[start, end], ...] リスト。
@@ -321,7 +333,11 @@ def walk(
         }
 
     code_addrs, _heads = trace(
-        addr_map, entry_points, resweep=resweep, unresolved=unresolved
+        addr_map,
+        entry_points,
+        resweep=resweep,
+        unresolved=unresolved,
+        stop_after=stop_after,
     )
 
     # データ領域 = 有効アドレス全体 - コード領域
