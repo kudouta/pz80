@@ -69,7 +69,9 @@ def classify_instruction(asm_str):
         return True, None
     mnemonic = tokens[0]
 
-    if mnemonic in ("RETI", "RETN", "HALT"):
+    # HALT は終端にしない。割り込みから戻ると次の命令へ進む（`HALT` → `JR loop`
+    # で垂直帰線を待つ形）。`DI; HALT` も同じ扱い。DI では NMI を止められない。
+    if mnemonic in ("RETI", "RETN"):
         return False, None
 
     if mnemonic == "RET":

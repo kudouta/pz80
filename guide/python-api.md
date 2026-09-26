@@ -354,9 +354,11 @@ result = d.exec(0x0000, images, len(images))
 
 隙間をはさむたびに `org` を出し直すので、出力はそのまま組み直せます。
 
-## 暗号化 ROM の復号 (M1 ハンドラー)
+## 命令の復号 (M1 ハンドラー)
 
 `m1_handler` に復号の関数を渡します。`walk()` と `disassemble()` の両方に同じ関数を渡すと、データ領域の検出から逆アセンブルまで同じ復号が使われます。
+
+扱えるのは、命令のバイトを「番地とそのバイトの値」だけで復号できる方式です。暗号化された ROM のすべてに対応するわけではありません（[config.md](config.md#m1_handler) を参照）。
 
 ```python
 from pz80 import Disasm, read_chunks, walk, disassemble
