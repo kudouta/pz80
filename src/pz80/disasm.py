@@ -16,7 +16,7 @@ _LABEL_NAME_CHARS = r"[\w.]+"
 _RE_LABEL_NAME = re.compile(rf"^{_LABEL_NAME_CHARS}$")
 
 # `equ` の値に使える辞書キー。read と write で役割が違うハードウェアレジスタ
-# （`0xB000` が読むと IrqEnable、書くと NmiOn、など）を 1 エントリで書くため。
+# （`0xE000` が読むと KeyIn、書くと IntEnable、など）を 1 エントリで書くため。
 # この順が `EQU` 定義行の出力順にもなる。
 _EQU_MODES = ("r", "w", "imm")
 
@@ -108,8 +108,8 @@ class Disasm:
 
             equ = {
                 0x8000: "MirrorRam",                      # 読み書き共通
-                0xB000: {"r": "IrqEnable", "w": "NmiOn"}, # 役割が違う
-                0xB801: {"w": "SndVolume"},               # 書き専用
+                0xE000: {"r": "KeyIn", "w": "IntEnable"}, # 役割が違う
+                0xE001: {"w": "SndVolume"},               # 書き専用
             }
 
         `imm` は `LD hl, nn` のように**アドレスを読むとも書くとも決まらない**
@@ -117,7 +117,7 @@ class Disasm:
         基板では**出力ラッチをまとめて初期化するループの先頭**になりやすく、
         そこでは書き名が正しい名前になります。
 
-            0xB000: {"r": "Dsw", "w": "NmiOn", "imm": "NmiOn"}
+            0xE000: {"r": "KeyIn", "w": "IntEnable", "imm": "IntEnable"}
 
         `dict(r=..., w=...)` でも同じものになりますが、利用者の設定ファイルを
         lint にかけると ruff の `C408`（`Unnecessary dict() call`）が出るので、
@@ -386,9 +386,9 @@ class Disasm:
         1. `disasm` が参照と定義を**レンダリング済みテキスト経由で**突き合わせる
            （`_attach_labels` が `_re_label` で住所を読み戻す）
         2. **名前の一意性を住所が保証している。** `label_names` は同じ名前を
-           別の番地に付けられてしまうが、`L_25CD@Str` と `L_3E89@Str` に
+           別の番地に付けられてしまうが、`L_1250@Str` と `L_1370@Str` に
            分かれるので衝突しない。住所を捨てると `Duplicate label definition`
-           で**再アセンブルできなくなる**（実際の設定で 51 件中 1 件が該当した）
+           で**再アセンブルできなくなる**
 
         `walk` と `_auto_entry` も `L_xxxx` から住所を読みます。**`L_xxxx` の形を
         やめる案**（`L_0066` → `L_@NMI`）ならあちらが壊れます。一方**名前付きの
@@ -1255,8 +1255,8 @@ class Disasm:
         `LD de, 0x0120` のようにジャンプ以外から指されるデータの先頭用）。
 
         **定義側は参照側の綴りをそのまま使います。** 正規表現が `@名前` ごと
-        `group(1)` に含むので、参照が `CALL L_0980@DRAW` なら定義も
-        `L_0980@DRAW:` になります。ここが食い違うと出力が再アセンブルできません。
+        `group(1)` に含むので、参照が `CALL L_0240@DRAW` なら定義も
+        `L_0240@DRAW:` になります。ここが食い違うと出力が再アセンブルできません。
 
         Args:
             lst (list): 逆アセンブル結果のリスト。

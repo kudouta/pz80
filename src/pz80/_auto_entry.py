@@ -22,7 +22,7 @@ from pz80.walk import build_addr_map, classify_instruction, sweep_from, trace
 
 # 逆アセンブラ出力に対するパターン
 # 16 ビットアドレスの表記。`0x0120` と、disasm が label_names で名前を添えた
-# `L_3FE0@MSG_TABLE` の両方を受ける。捕捉群は 1 つだけなので、どちらの綴りでも
+# `L_1240@MSG_TABLE` の両方を受ける。捕捉群は 1 つだけなので、どちらの綴りでも
 # 同じ group 番号で 4 桁が取れる（呼び出し側の group 番号を変えずに済む）。
 # 名前部分は `[\w.]+`。`.` は pz80 のラベルとして合法で、`StrA.D.1980` のような
 # 名前が実際に書かれる（`\w` だけだとドットで切れて住所の取りこぼしが起きる）。

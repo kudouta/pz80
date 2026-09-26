@@ -1,137 +1,8 @@
-# Pythonモジュールとしての使用
+# Python API
 
-> pz80 の**Python API リファレンス**です。CLI の使い方は [README.md](../README.md)、アセンブリ言語の仕様は [language.md](language.md) を参照してください。
+> pz80 を**Python のモジュールとして使う**ときのリファレンスです。コマンドは [cli.md](cli.md)、アセンブリの構文は [language.md](language.md) を参照してください。
 
-Pythonのソースから pz80 をインポートして使用する例です。
-
-## 公開API 一覧
-
-| シンボル                                                                                                        | 種別  | 概要                    |
-| ----------------------------------------------------------------------------------------------------------- | --- | --------------------- |
-| `assemble(source)`                                                                                          | 関数  | アセンブリソース文字列またはチャンクリストをバイト列に変換 |
-| `to_bytes(result)`                                                                                          | 関数  | アセンブル済みリストをバイト列に変換    |
-| `disassemble(data, start_address=0, data_regions=None, m1_handler=None, label_addresses=None, strmap=None, label_names=None, equ_names=None, valid_ranges=None)` | 関数  | バイト列をアセンブリ文字列リストに変換   |
-| `read_chunks(source)`                                                                                       | 関数  | バイナリファイルを整数リストとして読み込む |
-| `write_chunks(dest, data)`                                                                                  | 関数  | 整数リストをバイナリファイルに書き出す   |
-| `walk(data, start=0, extra_entries=None, valid_ranges=None, m1_handler=None)`                               | 関数  | 制御フローグラフでデータ領域を検出     |
-| `Asm`                                                                                                       | クラス | アセンブラ本体 (詳細制御用)       |
-| `Disasm`                                                                                                    | クラス | 逆アセンブラ本体 (詳細制御用)      |
-| `Z80`                                                                                                       | クラス | Z80命令テーブル・予約語の参照      |
-| `__version__`                                                                                               | 文字列 | pz80 のバージョン           |
-
-### Asm クラスの主なメソッド
-
-| メソッド                               | 概要                                  |
-| ---------------------------------- | ----------------------------------- |
-| `assemble_lines(lines, file=None)` | 行リスト (`list[str]`) からアセンブル          |
-| `assemble_chunks(chunks)`          | 複数チャンク `[(識別子, 行リスト), ...]` からアセンブル |
-| `exec(name, defines=None)`         | ソースファイルを読み込んでアセンブル                  |
-
-`assemble_lines()` の `file` は**ソースを識別する任意の文字列**です。ファイルパスとして解釈されることはなく、ファイルシステムにアクセスもしません。用途は 2 つあります。
-
-* エラーメッセージに `in <file>` として出る（省略時は `on line 1` の形）
-* 戻り値の各要素の `"file"` キーに入る（リスティングを組むときの引き当てキー）
-
-```python
-from pz80 import Asm
-
-Asm().assemble_lines(["ld a, 300"])
-# ValueError: Byte value 300 out of range on line 1 (expected -128 to 255)
-
-Asm().assemble_lines(["ld a, 300"], file="main_code")
-# ValueError: Byte value 300 out of range on line 1 in main_code (expected -128 to 255)
-```
-
-`None` と空文字列はどちらも「識別子なし」として扱われます。`assemble_lines(lines, file=X)` は `assemble_chunks([(X, lines)])` と等価で、`exec(name)` は渡したファイル名が自動的に `file` になります。
-
-`exec()` の `defines` は**条件アセンブル用のシンボル定義** `{名前: 値}` で、CLI の `-D` に対応します。ソース先頭に `名前: EQU 値` を前置したのと同じ扱いになるため、`IF` から参照でき、`labelmap` にも `equ` として現れます。
-
-```python
-from pz80 import Asm
-
-Asm().exec("conditional.asm", defines={"DEBUG": 1})
-Asm().exec("conditional.asm", defines={"DEBUG": "0x01"})   # 値は文字列でもよい
-```
-
-`IF` の条件に未定義のシンボルを書くとエラーになります（`0` とは扱われません）。バリアントを切り替えるソースでは、どの構成でも必ず定義を渡してください。
-
-### Asm クラスの主な属性
-
-アセンブル実行後に参照します。
-
-| 属性               | 概要                                                                       |
-| ---------------- | ------------------------------------------------------------------------ |
-| `labelmap`       | シンボル表 `[{"type": "equ"\|"label", "symbol": str, "value": int}, ...]`     |
-| `label2address`  | ラベルと確定アドレスの対応 `[{"label": str, "address": int}, ...]`                     |
-
-`value` は `equ` / `label` とも整数です。ラベルのアドレスは Pass 2 で確定するため、アセンブル完了後に参照してください。
-
-**`symbol` の大小文字の扱いは `type` によって異なります。**
-
-* `equ` — **大小文字を区別しません。** `symbol` は大文字に正規化されます（`Val: EQU 5` を `VAL` として登録し、`LD A,val` からも参照できる）。ニーモニックが大小文字を区別しないことに合わせています。
-* `label` — **大小文字を区別します。** `symbol` はソースに書かれたままで、`Start` と `START` は別のラベルになります。
-
-`labelmap` と `label2address` は同じシンボル表を別の形で見せたものです。実体は 1 つなので、両者が食い違うことはありません。
-
-> `Asm` にはこのほか `symbols` / `cpu` / `encoder` / `preprocessor` / `directive_handler` という属性もありますが、**内部実装の都合で持っているだけ**で API ではありません。予告なく変わるため依存しないでください。
-
-### 戻り値の形式
-
-`assemble_lines()` / `assemble_chunks()` / `exec()` の戻り値はアセンブル済みリストで、ソース上の並び順に次の3種類の辞書が入ります。
-
-| 種類     | 判別方法           | キー                                                          |
-| ------ | -------------- | ----------------------------------------------------------- |
-| 命令行    | `"opcode"` を持つ | `line`, `file`, `asm`, `base`, `offset`, `opcode`, `fixups`  |
-| ラベル定義行 | `"label"` を持つ  | `line`, `file`, `label`, `base`, `offset`                    |
-| 消費された行 | `"kind"` を持つ   | `line`, `file`, `asm`, `kind`                                |
-
-`kind` は `"equ"` / `"org"` / `"if"` / `"else"` / `"endif"` / `"skipped"` のいずれかです。**`"skipped"` は条件アセンブルで偽と判定されて捨てられた行**で、疑似命令として消費された行と区別できます。
-
-消費された行は番地を占有しないため `base` / `offset` を持ちません。アドレスを求めるときは `"opcode"` か `"label"` を持つ要素だけを対象にしてください。
-
-戻り値は**行の並び**であってメモリイメージではありません。バイト列が欲しいだけなら `assemble()` か `to_bytes()` を使ってください（「[アセンブル](#アセンブル)」を参照）。行ごとの情報を使ってリスティングを組む例は「[アセンブル結果の一覧表示](#アセンブル結果の一覧表示)」にあります。
-
-### Disasm クラスの主なメソッド・属性
-
-| 名前                          | 種別    | 概要                                             |
-| --------------------------- | ----- | ---------------------------------------------- |
-| `exec(start, images, size)` | メソッド  | バイナリイメージを逆アセンブル                                |
-| `op2asm(adr, opcode)`       | メソッド  | 1命令のオペコードを文字列化                                 |
-| `m1_handler`                | 属性    | M1サイクル復号ハンドラー `(addr, byte) -> byte`（暗号化ROM対応） |
-| `label_addresses`           | 属性    | 強制的にラベルを付与するアドレスのリスト（NMI 等の参照なしエントリ用）          |
-| `label_names`               | 属性    | `{アドレス: 名前}`。ラベルが `L_0066@NMI` の形になり、そこを指す 16 ビットオペランドも置き換わる |
-| `equ_names`                 | 属性    | `{アドレス: 名前 \| {"r": …, "w": …}}`。範囲外の定数に `EQU` で名前を付ける |
-| `label_no_imm`              | プロパティ | `label_names` で `{"imm": False}` にした番地の集合（読み取り専用） |
-| `raw_operand`               | プロパティ | 16 ビットオペランドを数値のまま出す**命令の番地**の集合           |
-| `comments`                  | プロパティ | `{番地: 文字列 \| {"line": …, "block": …}}`。出力へコメントを出す |
-| `datamap`                   | プロパティ | データ領域の設定。要素は `[start, end]` か `{"range": …, "fmt": "b w", "per_line": 8}`。読むと `[[start, end], ...]` |
-| `warnings`                  | 属性    | 直前の `exec()` で出た警告（`fmt` で範囲を割り切れない等）の文字列リスト。`exec()` ごとに作り直す |
-| `valid_ranges`              | プロパティ | バイナリが実在する範囲 `[[start, end], ...]`。隙間を出力から除外する  |
-| `cpu.strmap`                | 属性    | バイト値 → 表示文字の256要素タプル                           |
-
-`cpu` は `Disasm` が保持する `Z80` インスタンスです。上記以外のメンバは内部実装なので依存しないでください。
-
-### Z80 クラスの主な属性
-
-| 名前         | 種別    | 概要                                          |
-| ---------- | ----- | ------------------------------------------- |
-| `reserved` | プロパティ | 予約語 (レジスタ・ニーモニック・疑似命令) のソート済みリスト            |
-| `asm_map`  | プロパティ | アセンブラ用マップ (ニーモニック → 命令情報)                   |
-| `op_map`   | プロパティ | 逆アセンブラ用マップ (オペコード → 命令情報)                    |
-| `codetbl`  | プロパティ | 命令表そのもの (1138 件のリスト)。`asm_map` / `op_map` の元 |
-| `strmap`   | プロパティ | バイト値 → 表示文字の256要素タプル (逆アセンブル時のダンプに使う)        |
-
-### walk のエントリポイント・シンボル名
-
-`walk()` の `extra_entries` には以下のシンボル名 (文字列) または整数アドレスを指定できます。
-
-| シンボル             | アドレス     | シンボル           | アドレス     |
-| ---------------- | -------- | -------------- | -------- |
-| `RESET` / `RST0` | `0x0000` | `RST4`         | `0x0020` |
-| `RST1`           | `0x0008` | `RST5`         | `0x0028` |
-| `RST2`           | `0x0010` | `RST6`         | `0x0030` |
-| `RST3`           | `0x0018` | `RST7` / `IM1` | `0x0038` |
-|                  |          | `NMI`          | `0x0066` |
+前半で用途ごとの使い方を、後半の「[リファレンス](#リファレンス)」で関数・クラスの一覧と戻り値の形式を説明します。
 
 ## 例を動かす準備
 
@@ -161,60 +32,6 @@ pathlib.Path("conditional.asm").write_text(
     "IF DEBUG\nnop\nELSE\nret\nENDIF\n", encoding="utf-8")
 ```
 
-## バイナリファイルの読み込み
-
-`read_chunks()` はバイナリファイルを整数リストとして読み込む汎用ユーティリティです。
-
-```python
-from pz80 import read_chunks
-
-# 単一ファイル
-data = read_chunks("rom.bin")  # → list[int]
-
-# 複数ファイルをアドレス指定で配置
-data = read_chunks([
-    ("prg0.bin", 0x0000),
-    ("prg1.bin", 0x0800),
-    ("prg2.bin", 0x1000),
-    ("prg3.bin", 0x3800),
-])  # → list[int] (アドレス間のギャップは 0x00 で埋められる)
-```
-
-読み込んだリストはPythonで直接解析・加工できます。
-
-```python
-from pz80 import read_chunks
-
-# パターン探索の例: 'A''@' で始まり 'E''$' で終わるブロックを検出
-data = read_chunks("rom.bin")
-A, AT = ord('A'), ord('@')
-E, DOLLAR = ord('E'), ord('$')
-
-for i in range(len(data) - 1):
-    if data[i] == A and data[i + 1] == AT:
-        for j in range(i + 2, len(data) - 1):
-            if data[j] == E and data[j + 1] == DOLLAR:
-                print(f"0x{i:04X} - 0x{j + 1:04X}")
-                break
-```
-
-`write_chunks()` と組み合わせると read → 加工 → write のワークフローが完結します。
-
-```python
-from pz80 import read_chunks, write_chunks
-
-# ROM読み込み・加工・書き出し
-data = read_chunks([("prg0.bin", 0x0000), ("prg1.bin", 0x0800)])
-data[0x0123] = 0x00   # NOP に差し替え（パッチ）
-write_chunks("patched.bin", data)
-
-# 元のROM単位に分割して書き出し
-write_chunks([
-    ("prg0_patched.bin", 0x0000, 0x07FF),
-    ("prg1_patched.bin", 0x0800, 0x0FFF),
-], data)
-```
-
 ## アセンブル
 
 ```python
@@ -229,7 +46,7 @@ source_code = """
 binary_data = assemble(source_code)
 ```
 
-`assemble()` はソース文字列のほか、後述する**チャンクリスト**も受け付けます。どちらの場合も配置先の最小アドレスから最大アドレスまでを返し、`ORG` で飛ばした範囲は `0x00` で埋まります。
+`assemble()` はソースの文字列のほか、後述の**チャンクのリスト**も受け付けます。どちらの場合も、置いた範囲の最小の番地から最大の番地までを返します。`ORG` で飛ばした範囲は `0x00` で埋まります。
 
 ```python
 from pz80 import assemble
@@ -238,9 +55,9 @@ data = assemble("ORG 0x0000\nDB 0x11, 0x22\nORG 0x0008\nDB 0x33\n")
 # b'\x11\x22\x00\x00\x00\x00\x00\x00\x33'  (9 バイト)
 ```
 
-### Asm クラスを使った詳細制御
+### Asm クラス
 
-`Asm` クラスを直接使うと、行リストや複数チャンクからのアセンブルが可能です。
+`Asm` クラスを直接使うと、行のリストやファイルからアセンブルでき、シンボル表も参照できます。
 
 ```python
 from pz80 import Asm
@@ -260,9 +77,21 @@ result = Asm().assemble_lines(lines_2, file="sub_code")
 result = Asm().exec("main.asm")
 ```
 
-`assemble_lines()` の呼び出しはそれぞれ独立していて、状態は持ち越されません（`ORG` もラベルも引き継がれない）。上の例のように 2 本のソースを扱う場合、`result` は最後の呼び出しの分だけになります。**両方を 1 つのバイナリにまとめたいなら `assemble_chunks()` を使ってください**（後述）。`file` はそのときのチャンク識別子と同じ役割です。
+`assemble_lines()` の呼び出しはそれぞれ独立していて、`ORG` もラベルも引き継がれません。上の例の `result` は最後の呼び出しの分だけです。**複数のソースを 1 つのバイナリにまとめるには `assemble_chunks()` を使ってください**（[後述](#複数チャンクの連結アセンブル)）。
 
-戻り値は行ごとの情報を持つリストです（形式は「[戻り値の形式](#戻り値の形式)」を参照）。バイト列にするには `to_bytes()` に渡します。
+`file` は**ソースを識別する任意の文字列**で、ファイルとして開かれることはありません。エラーメッセージに `in <file>` として出るほか、戻り値の各行の `"file"` キーに入ります。
+
+```python
+from pz80 import Asm
+
+Asm().assemble_lines(["ld a, 300"])
+# ValueError: Byte value 300 out of range on line 1 (expected -128 to 255)
+
+Asm().assemble_lines(["ld a, 300"], file="main_code")
+# ValueError: Byte value 300 out of range on line 1 in main_code (expected -128 to 255)
+```
+
+戻り値は行ごとの情報を持つリストです（形式は「[戻り値の形式](#戻り値の形式)」）。バイト列にするには `to_bytes()` に渡します。
 
 ```python
 from pz80 import Asm, to_bytes
@@ -271,16 +100,29 @@ result = Asm().assemble_lines(["ld a, 0x2A", "ret"])
 data = to_bytes(result)          # b'\x3e\x2a\xc9'
 ```
 
-戻り値は**行の並び**であってメモリイメージではありません。各行の配置先は `base + offset` で、`ORG` で飛ばした範囲は行として存在しないため、`opcode` を単純に連結すると隙間が詰まります。
+戻り値は**行の並び**で、メモリイメージではありません。`opcode` を単純につなぐと、`ORG` で飛ばした隙間が詰まってしまいます。
 
 ```python
 # NG: ORG の隙間が失われる（上の 9 バイトの例なら 3 バイトになる）
 data = [b for item in result if item.get("opcode") for b in item["opcode"]]
 ```
 
+### 条件アセンブルのシンボル
+
+`exec()` の `defines` は条件アセンブル用のシンボル `{名前: 値}` で、CLI の `-D` に当たります。ソースの先頭に `名前: EQU 値` を書いたのと同じ扱いです。
+
+```python
+from pz80 import Asm
+
+Asm().exec("conditional.asm", defines={"DEBUG": 1})
+Asm().exec("conditional.asm", defines={"DEBUG": "0x01"})   # 値は文字列でもよい
+```
+
+`IF` の条件に未定義のシンボルを書くとエラーになります（`0` とは扱われません）。構成を切り替えるソースでは、どの構成でも必ず値を渡してください。
+
 ### 複数チャンクの連結アセンブル
 
-`assemble_chunks()` は `(文字列, Python処理系)` のタプルリストを受け取り、すべてを連結してアセンブルします。Python 上で実装した関数をアセンブル時に動作させることでアセンブルの拡張機能をPythonで実現できます。
+`assemble_chunks()` は `(識別子, 行のリスト)` のリストを受け取り、つないで 1 本のソースとしてアセンブルします。行のリストは Python で自由に作れるので、`INCLUDE`・マクロ・バイナリの埋め込み・他のアセンブラの記法の変換といった処理を Python で書けます。
 
 ```python
 from pz80 import Asm
@@ -320,38 +162,26 @@ chunks = [
 result = Asm().assemble_chunks(chunks)
 ```
 
-チャンクは**行のリスト**なので、`convert_literals` のように**前段で変換を挟む**こともできます。`INCLUDE` やマクロと同じく「アセンブラの文法を増やさず、Python 側で処理する」形になります。どう読み替えるかはソースごとに違うため、その判断をアセンブラに埋め込まずに済みます。
+**チャンクは上から順につながり、1 本のソースとして扱われます。** 次のものはチャンクをまたいで引き継がれます。
 
-各チャンクに含まれる第1要素の文字列はエラーメッセージ出力時に表示するため、各チャンクを連結後でもエラー箇所を特定できます。
+* `ORG` で決めた番地
+* ラベル（どのチャンクで定義しても、どのチャンクからも参照できる）
+* `EQU` 定数（右辺の後方参照はチャンクをまたいでも有効。前方参照ができないのは 1 本のソースと同じ）
+* `IF` / `ELSE` / `ENDIF` の入れ子（`IF` がチャンクをまたいでもよい）
+
+行番号はチャンクごとに 1 から数えます。エラーメッセージには識別子が付くので、どのチャンクの何行目か分かります。
 
 ```
 Byte value 256 out of range on line 7 in bootcode (expected -128 to 255)
 ```
 
-**連結のセマンティクス:**
-
-チャンクはリストの順に**上から連結**されます。独立した翻訳単位ではなく、1 本のソースとして扱われるため、次の状態がチャンクを跨いで継続します。`INCLUDE` の代替として設計しているため、この「テキストを貼り付ける」意味づけになります。
-
-* `ORG` で設定したベースアドレス
-* ラベル（どのチャンクで定義しても、どのチャンクからも参照できる）
-* `EQU` 定数（EQU 右辺での後方参照はチャンクを跨いでも有効。前方参照が不可なのは 1 本のソースの場合と同じ）
-* `IF` / `ELSE` / `ENDIF` のネスト状態（`IF` がチャンクを跨いでもよい）
-
-行番号は**チャンクごとに 1 から**振られます。そのためエラー位置の特定には識別子が必要です。識別子が重複した場合は 2 つ目以降に `#2`, `#3` … が付いて一意になります（同じファイルを 2 回取り込む使い方を妨げないため）。
-
-```
-Byte value 256 out of range on line 7 in macros.asm#2 (expected -128 to 255)
-```
-
-識別子は文字列か `None` のみ受け付けます。`None` と空文字列は「識別子なし」として扱われ、`line 7` の形になります。
-
-第2要素は行の並び（リストやタプル）である必要があり、1 本の文字列を渡すとエラーになります（1 文字ずつイテレートされてしまうため。文字列から作る場合は `splitlines()` で分割してください）。
+* 同じ識別子が 2 回以上出てくると、2 つ目以降に `#2`, `#3` … が付きます（`in macros.asm#2`）。
+* 識別子は文字列か `None` です。`None` と空文字列は「識別子なし」で、`on line 7` の形になります。
+* 行のリストの代わりに 1 本の文字列を渡すとエラーになります。文字列から作るときは `splitlines()` で分けてください。
 
 ### アセンブル結果の一覧表示
 
-アセンブル結果を一覧表示する専用の機能はありません。ただし各行が `(識別子, 行番号)` を持つので、**入力チャンクを同じキーで引けるようにしておく**と、元のソース行（コメント込み）を添えたリスティングが作れます。
-
-チャンクを Python 側で組み立てる使い方では、渡したソースが実際にどう解釈されたかを確かめる手段としてこれが効きます。命令行の `asm` は `EQU` 置換**後**なのでシンボル名が失われますが、元のソース行を添えれば残ります。
+一覧表示の機能はありませんが、戻り値の各行が `(識別子, 行番号)` を持つので、入力のチャンクを同じキーで引けば元のソース行（コメント込み）を添えた一覧が作れます。命令行の `asm` は `EQU` を置き換えた後の文字列なので、元のソース行を添えるとシンボル名も読めます。
 
 ```python
 from pz80 import Asm
@@ -387,7 +217,7 @@ ADDR  OPCODE       KIND      SOURCE
 8004  C3 00 80                       JP START
 ```
 
-`kind` を持つ行はバイトを生成しません。**`"skipped"` だけが条件アセンブルで偽と判定されて捨てられた行**で、`equ` / `org` / `if` / `else` / `endif`（疑似命令として消費された行）と区別できます。`-D` で条件を切り替えるビルドで、どちらの枝が生きたかを確かめられます。
+`kind` を持つ行はバイトを生みません。**`"skipped"` は条件アセンブルで捨てられた行**で、`equ` / `org` / `if` / `else` / `endif`（疑似命令として消費された行）と区別できます。`-D` で条件を切り替えるとき、どちらの枝が使われたかを確かめられます。
 
 ## 逆アセンブル
 
@@ -424,16 +254,15 @@ instructions = disassemble(binary_data, data_regions=[[0x0000, 0x0002]],
                            strmap=tuple(chr_table))
 
 # ラベルに名前を添える（定義側と参照側の両方が L_0004@DRAW_SPRITE になる）
-# アドレスは名前に残る。walk と --auto-entry がラベル名からアドレスを読み戻すため
 # 名前を付けたアドレスを指す LD de, nn なども同じ綴りに置き換わる
 jump_rom = b'\xC3\x04\x00\x00\x76'      # JP 0x0004 / NOP / HALT
 instructions = disassemble(jump_rom, label_names={0x0004: "DRAW_SPRITE"})
 
 # 逆アセンブル範囲外の定数（RAM・I/O）は equ_names で。裸の名前で出る
 # 読み書きで役割が違うレジスタは {"r": ..., "w": ...} で分けられる
-io_rom = b'\x3A\x00\xB0\x32\x00\xB0'    # LD a,(0xB000) / LD (0xB000),a
+io_rom = b'\x3A\x00\xE0\x32\x00\xE0'    # LD a,(0xE000) / LD (0xE000),a
 instructions = disassemble(io_rom,
-                           equ_names={0xB000: {"r": "IrqEnable", "w": "NmiOn"}})
+                           equ_names={0xE000: {"r": "KeyIn", "w": "IntEnable"}})
 
 # バイナリが実在する範囲を指定（bins の隙間を出力から除外する）
 # walk() の valid_ranges と同じものを渡す。隙間の手前で org を出し直すので
@@ -443,9 +272,13 @@ instructions = disassemble(gapped, valid_ranges=[[0x0000, 0x0003],
                                                  [0x0008, 0x000B]])
 ```
 
+引数の意味は設定ファイルのキーと同じです（`data_regions` = `data`、`label_names` = `labels`、`equ_names` = `equ` など）。書き方の詳細は [config.md](config.md) を参照してください。
+
+`disassemble()` は行の文字列だけを返します。`data` の `fmt` で範囲を割り切れないときの警告などを受け取るには、`Disasm` クラスを使い、`exec()` の後に `warnings` を読んでください。
+
 ### 行の無い番地を指す参照
 
-`JP L_8000` のように**逆アセンブル結果に行が無い番地**を指す参照には、先頭に `EQU` の定義が付きます。RAM へ飛ぶもの、命令の途中を指すもの、`valid_ranges` の隙間を指すものが該当します。
+`JP L_8000` のように、逆アセンブル結果に行が無い番地を指す参照には、先頭に `EQU` の定義が付きます。RAM へ飛ぶもの、命令の途中を指すもの、`valid_ranges` の隙間を指すものが該当します。
 
 ```asm
 L_8000: EQU 0x8000
@@ -454,9 +287,9 @@ org 0x0000
     HALT
 ```
 
-定義が無いと `Undefined symbol` で再アセンブルできません。値は分かっているので `EQU` にしています。`equ_names` で同じ番地に名前を付けていても衝突しません（pz80 は値の同じ `EQU` を別名で定義できます）。
+`equ_names` で同じ番地に名前を付けていても衝突しません。
 
-## データ領域検出 (walk)
+## データ領域の検出 (walk)
 
 ```python
 from pz80 import walk
@@ -470,7 +303,7 @@ print(regions)
 # → [[0x1000, 0x12FF], [0x2000, 0x2FFF]]
 ```
 
-`extra_entries` にはシンボル名（`"NMI"`, `"IM1"` など）と整数アドレスを混在して指定できます。
+`extra_entries` にはシンボル名（`"NMI"`, `"IM1"` など）と整数を混ぜて書けます。使えるシンボル名は [cli.md の表](cli.md#エントリポイントのシンボル名)を参照してください。
 
 ```python
 # disasm と組み合わせてデータ領域を正しく逆アセンブル
@@ -486,9 +319,9 @@ d.datamap = regions
 result = d.exec(0x0000, list(binary), len(binary))
 ```
 
-### 複数バイナリファイルを異なるアドレスに配置する場合
+### 複数のファイルを別々の番地に置く
 
-`read_chunks()` と `valid_ranges` を組み合わせることで、ファイル間のギャップ領域を除外した正確な解析ができます。
+`read_chunks()` と `valid_ranges` を組み合わせると、ファイルの間の隙間を除いて解析できます。
 
 ```python
 import os
@@ -519,15 +352,11 @@ d.valid_ranges = valid_ranges
 result = d.exec(0x0000, images, len(images))
 ```
 
-隙間を挟むたびに `org` を出し直すので、出力はそのまま再アセンブルできます。命令の復号も区間の終端で止まるため、隙間のバイトを巻き込んだ命令ができることもありません。
+隙間をはさむたびに `org` を出し直すので、出力はそのまま組み直せます。
 
-## 暗号化バイナリーファイルの逆アセンブル (M1ハンドラー)
+## 暗号化 ROM の復号 (M1 ハンドラー)
 
-`m1_handler` を暗号化バイナリーファイルの復号化処理に利用できます（暗号化のロジックによる）。
-
-設定した関数はオペコードバイト（プレフィックス含む）のフェッチ時のみ呼ばれ、即値やディスプレースメントなどのオペランドバイトには呼ばれません。
-
-`walk()` と `disassemble()` の両方に `m1_handler` を渡すことで、データ領域検出から逆アセンブルまで一貫して復号できます。`label_addresses` に `walk()` と同じエントリポイントを渡せば、NMI など参照のないアドレスにもラベルが付き一貫します。
+`m1_handler` に復号の関数を渡します。`walk()` と `disassemble()` の両方に同じ関数を渡すと、データ領域の検出から逆アセンブルまで同じ復号が使われます。
 
 ```python
 from pz80 import Disasm, read_chunks, walk, disassemble
@@ -550,15 +379,151 @@ lines = disassemble(data, data_regions=regions, m1_handler=decrypt,
                     label_addresses=entries)
 ```
 
-M1ハンドラーは `(address: int, byte: int) -> int` の形式で定義します。Z80のM1フェッチ規則に従い、以下のバイトにのみ適用されます：
+関数は `(address: int, byte: int) -> int` の形です。呼ばれるのは命令を読むとき（M1 サイクル）のバイトだけで、即値やディスプレースメントには呼ばれません。
 
-| 命令パターン                     | M1対象バイト                                  |
-| -------------------------- | ---------------------------------------- |
-| 通常命令                       | バイト0のみ                                   |
-| プレフィックス命令 (CB/DD/FD/ED xx) | バイト0・1                                   |
-| DDCB/FDCB命令 (DD CB d op)   | バイト0・1のみ（バイト2のディスプレースメント・バイト3のオペコードは対象外） |
+| 命令の形 | 関数が呼ばれるバイト |
+| --- | --- |
+| 通常の命令 | 1 バイト目 |
+| プレフィックス付き（`CB` / `DD` / `FD` / `ED` xx） | 1・2 バイト目 |
+| `DDCB` / `FDCB`（`DD CB d op`） | 1・2 バイト目（3 バイト目のディスプレースメントと 4 バイト目のオペコードは対象外） |
 
 
-> **補足: 元データは破壊されません**
-> `m1_handler` の戻り値（復号結果）は逆アセンブル出力にのみ反映され、入力した `data`（`read_chunks()` で構築した images など）は書き換えられません。内部で常にコピーに対して復号を適用するため、同じ `data` を `walk()` と `disassemble()` に続けて渡しても、一方の M1 復号が他方に影響することはありません。
+**入力のデータは書き換えられません。** 復号は内部のコピーに対して行うので、同じ `data` を `walk()` と `disassemble()` に続けて渡しても、互いに影響しません。
 
+## バイナリの読み書き
+
+`read_chunks()` はバイナリファイルを整数のリストとして読みます。
+
+```python
+from pz80 import read_chunks
+
+# 単一ファイル
+data = read_chunks("rom.bin")  # → list[int]
+
+# 複数ファイルをアドレス指定で配置
+data = read_chunks([
+    ("prg0.bin", 0x0000),
+    ("prg1.bin", 0x0800),
+    ("prg2.bin", 0x1000),
+    ("prg3.bin", 0x3800),
+])  # → list[int] (アドレス間のギャップは 0x00 で埋められる)
+```
+
+読んだリストは Python でそのまま調べたり加工したりできます。
+
+```python
+from pz80 import read_chunks
+
+# パターン探索の例: 'A''@' で始まり 'E''$' で終わるブロックを検出
+data = read_chunks("rom.bin")
+A, AT = ord('A'), ord('@')
+E, DOLLAR = ord('E'), ord('$')
+
+for i in range(len(data) - 1):
+    if data[i] == A and data[i + 1] == AT:
+        for j in range(i + 2, len(data) - 1):
+            if data[j] == E and data[j + 1] == DOLLAR:
+                print(f"0x{i:04X} - 0x{j + 1:04X}")
+                break
+```
+
+`write_chunks()` で書き戻せます。読む → 加工する → 書く、が Python の中で完結します。
+
+```python
+from pz80 import read_chunks, write_chunks
+
+# ROM読み込み・加工・書き出し
+data = read_chunks([("prg0.bin", 0x0000), ("prg1.bin", 0x0800)])
+data[0x0123] = 0x00   # NOP に差し替え（パッチ）
+write_chunks("patched.bin", data)
+
+# 元のROM単位に分割して書き出し
+write_chunks([
+    ("prg0_patched.bin", 0x0000, 0x07FF),
+    ("prg1_patched.bin", 0x0800, 0x0FFF),
+], data)
+```
+
+## リファレンス
+
+### 公開 API の一覧
+
+| シンボル | 種別 | 内容 |
+| --- | --- | --- |
+| `assemble(source)` | 関数 | ソースの文字列かチャンクのリストをバイト列にする |
+| `to_bytes(result)` | 関数 | アセンブル済みのリストをバイト列にする |
+| `disassemble(data, start_address=0, data_regions=None, m1_handler=None, label_addresses=None, strmap=None, label_names=None, equ_names=None, valid_ranges=None, raw_operand=None, comments=None)` | 関数 | バイト列を逆アセンブルして、行の文字列のリストを返す |
+| `read_chunks(source)` | 関数 | バイナリファイルを整数のリストとして読む |
+| `write_chunks(dest, data)` | 関数 | 整数のリストをバイナリファイルに書く |
+| `walk(data, start=0, extra_entries=None, valid_ranges=None, m1_handler=None)` | 関数 | 制御の流れを追ってデータ領域を返す |
+| `Asm` | クラス | アセンブラ本体 |
+| `Disasm` | クラス | 逆アセンブラ本体 |
+| `Z80` | クラス | 命令表・予約語の参照 |
+| `__version__` | 文字列 | pz80 のバージョン |
+
+### Asm クラス
+
+| メソッド | 内容 |
+| --- | --- |
+| `assemble_lines(lines, file=None)` | 行のリスト（`list[str]`）からアセンブル |
+| `assemble_chunks(chunks)` | チャンクのリスト `[(識別子, 行のリスト), ...]` からアセンブル |
+| `exec(name, defines=None)` | ソースファイルを読んでアセンブル |
+
+`assemble_lines(lines, file=X)` は `assemble_chunks([(X, lines)])` と同じです。`exec(name)` では、渡したファイル名が `file` になります。`None` と空文字列はどちらも「識別子なし」です。
+
+アセンブルの後に読める属性です。
+
+| 属性 | 内容 |
+| --- | --- |
+| `labelmap` | シンボル表 `[{"type": "equ"\|"label", "symbol": str, "value": int}, ...]` |
+| `label2address` | ラベルと番地の対応 `[{"label": str, "address": int}, ...]` |
+
+* `labelmap` と `label2address` は同じシンボル表の別の見せ方で、食い違うことはありません。
+* **`equ` は大文字・小文字を区別しません。** `symbol` は大文字にそろえて登録されます（`Val: EQU 5` は `VAL` になり、`LD A,val` からも参照できる）。
+* **`label` は大文字・小文字を区別します。** `symbol` は書いたままで、`Start` と `START` は別のラベルです。
+
+> `Asm` にはこのほか `symbols` / `cpu` / `encoder` / `preprocessor` / `directive_handler` という属性もありますが、内部の都合で持っているだけで API ではありません。予告なく変わります。
+
+### 戻り値の形式
+
+`assemble_lines()` / `assemble_chunks()` / `exec()` の戻り値は、ソースの並び順に次の 3 種類の辞書が入ったリストです。
+
+| 種類 | 見分け方 | キー |
+| --- | --- | --- |
+| 命令行 | `"opcode"` を持つ | `line`, `file`, `asm`, `base`, `offset`, `opcode`, `fixups` |
+| ラベル定義行 | `"label"` を持つ | `line`, `file`, `label`, `base`, `offset` |
+| 消費された行 | `"kind"` を持つ | `line`, `file`, `asm`, `kind` |
+
+* `kind` は `"equ"` / `"org"` / `"if"` / `"else"` / `"endif"` / `"skipped"` のどれかです。`"skipped"` は条件アセンブルで捨てられた行です。
+* 各行の番地は `base + offset` です。消費された行は番地を持たないので、番地を求めるときは `"opcode"` か `"label"` を持つ行だけを使ってください。
+* バイト列が欲しいだけなら、`assemble()` か `to_bytes()` を使ってください。
+
+### Disasm クラス
+
+| 名前 | 種別 | 内容 |
+| --- | --- | --- |
+| `exec(start, images, size)` | メソッド | バイナリイメージを逆アセンブルする |
+| `op2asm(adr, opcode)` | メソッド | 1 命令のバイト列を文字列にする |
+| `datamap` | プロパティ | データ領域（設定ファイルの `data`）。読むと `[[start, end], ...]` |
+| `label_addresses` | 属性 | ラベルを付ける番地のリスト（設定ファイルの `entry`） |
+| `label_names` | 属性 | `{番地: 名前}`（設定ファイルの `labels`） |
+| `label_no_imm` | プロパティ | `label_names` で `{"imm": False}` にした番地の集合（読み取り専用） |
+| `equ_names` | 属性 | `{番地: 名前 \| {"r": …, "w": …, "imm": …}}`（設定ファイルの `equ`） |
+| `raw_operand` | プロパティ | オペランドを数値のまま出す命令の番地の集合 |
+| `comments` | プロパティ | `{番地: 文字列 \| {"line": …, "block": …}}` |
+| `valid_ranges` | プロパティ | バイナリが実在する範囲 `[[start, end], ...]`。隙間は出力から除外される |
+| `m1_handler` | 属性 | 復号の関数 `(addr, byte) -> byte` |
+| `cpu.strmap` | 属性 | `db` 行の `; [文字]` に使う 256 要素のタプル（設定ファイルの `chr`） |
+| `warnings` | 属性 | 直前の `exec()` で出た警告の文字列のリスト。`exec()` ごとに作り直される |
+
+`cpu` は `Disasm` が持つ `Z80` のインスタンスです。上の表にないメンバは内部の実装なので、依存しないでください。
+
+### Z80 クラス
+
+| 名前 | 種別 | 内容 |
+| --- | --- | --- |
+| `reserved` | プロパティ | 予約語（レジスタ・ニーモニック・疑似命令）のソート済みリスト |
+| `asm_map` | プロパティ | アセンブラ用の表（ニーモニック → 命令の情報） |
+| `op_map` | プロパティ | 逆アセンブラ用の表（バイト列 → 命令の情報） |
+| `codetbl` | プロパティ | 命令表そのもの（1138 件のリスト）。`asm_map` / `op_map` の元 |
+| `strmap` | プロパティ | バイト値 → 表示文字の 256 要素タプル |
