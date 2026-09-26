@@ -37,6 +37,9 @@ _EQU_FALLBACK = {
 # 16 ビット即値（`LD rr, nn`）の置き換えに使われなくなる。
 _LABEL_KEYS = ("name", "imm")
 
+# `comments` の値に辞書を書くときのキー。`line` は行末、`block` は行の前。
+_COMMENT_KEYS = ("line", "block")
+
 
 class Disasm:
     """Z80逆アセンブラクラス"""
@@ -65,6 +68,7 @@ class Disasm:
         self._label_names = {}
         self._label_no_imm = set()  # 16 ビット即値の置き換えに使わない番地
         self._raw_operand = set()  # オペランドを数値のまま出す命令の番地
+        self._comments = {}  # 出力へ出すコメント {番地: {"line": …, "block": …}}
         self._equ_names = {}
 
     @property
@@ -290,6 +294,73 @@ class Disasm:
             value (iterable | None): 命令の番地。`parse_entry()` が解釈できる形。
         """
         self._raw_operand = {parse_entry(a) for a in (value or ())}
+
+    @property
+    def comments(self):
+        """出力へ出すコメント `{番地: {"line": …, "block": …}}`。
+
+        Returns:
+            dict: キーは int に解決済み。文字列指定は `{"line": …}` に正規化される。
+        """
+        return self._comments
+
+    @comments.setter
+    def comments(self, value):
+        """コメントを検証して設定します。
+
+        **`labels` や `equ` では付けられない注釈のためにあります。** たとえば
+        `LD a, 0x03` の `0x03` が曲番号だと分かっていても、番地ではないので
+        名前を付ける機構では扱えません。設定ファイル側のコメントは Python の
+        コメントなので出力に出ず、出力へ手で書き足しても**作り直すと消えます**。
+
+        値は文字列か、`line` / `block` を持つ dict です。
+
+            comments = {
+                0x0120: "曲番号 3",                     # 行末に出す
+                0x0200: {"block": "サウンドドライバ\\n毎フレーム NMI から呼ぶ"},
+                0x0340: {"line": "効果音 1", "block": "爆発音"},
+            }
+
+        `line` はその行の末尾へ `; …` として付きます。`block` はその行の**前**に
+        `; …` の行として出ます（`\\n` ごとに 1 行）。ラベルがある番地では
+        **ラベル行より前**に出るので、「ここから何が始まるか」の見出しになります。
+
+        Args:
+            value (dict | None): `{番地: 文字列 | dict}`。
+
+        Raises:
+            ValueError: 未知のキー、空の指定、`line` に改行が含まれる場合。
+        """
+        parsed = {}
+        for key, spec in (value or {}).items():
+            if isinstance(spec, str):
+                spec = {"line": spec}
+            if not isinstance(spec, dict) or not spec:
+                raise ValueError(
+                    f"Invalid comment for address {key}: {spec!r} "
+                    f'(use a string, or {{"line": ..., "block": ...}})'
+                )
+            unknown = set(spec) - set(_COMMENT_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"Invalid comment keys for address {key}: {sorted(unknown)} "
+                    f"(use {' / '.join(_COMMENT_KEYS)})"
+                )
+            for name, text in spec.items():
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError(
+                        f"Invalid comment {name} for address {key}: {text!r} "
+                        f"(use a non-empty string)"
+                    )
+                # 行末コメントに改行が入ると、その行だけでは閉じない出力になる。
+                # 複数行を出したいときは `block` を使う。
+                if name == "line" and "\n" in text:
+                    raise ValueError(
+                        f"Invalid comment line for address {key}: contains a newline "
+                        f"(use block for multiple lines)"
+                    )
+            parsed[parse_entry(key)] = dict(spec)
+        self._comments = parsed
 
     def _label_text(self, addr):
         """アドレスに対応するラベル文字列を返します。
@@ -636,6 +707,9 @@ class Disasm:
             lst += self._scan(mem, seg_start, seg_end)
 
         dangling = self._attach_labels(lst)
+        # コメントは `_attach_labels` の後。番地を持たない行を混ぜるので索引作りの
+        # 後でなければならず、`block` をラベルより前に出すためにもこの順が要る。
+        lst = self._apply_comments(lst, segments)
         # EQU 行は `_attach_labels` の後で足す。あちらは `item["address"]` で
         # 索引を作るので、番地を持たない行を混ぜない。
         return self._equ_rows() + self._dangling_rows(dangling) + lst
@@ -669,6 +743,103 @@ class Disasm:
                 f"labels outside the disassembled range {where}: {listed} "
                 f"(use equ for RAM / I/O addresses)"
             )
+
+    def _apply_comments(self, lst, segments):
+        """`comments` を行へ反映した新しいリストを返します。
+
+        `line` は行の `asm` の末尾へ足し、`block` は**その行の前**に番地を持たない
+        行として挿し込みます。データ行にはすでに `; [文字]` の注釈が付いているので、
+        `db 0x04 ; [.] ; 速度` と並びます（文字注釈は落としません。
+        文字列データで役に立つため）。
+
+        `_attach_labels()` の**後**に呼んでください。あちらは `item["address"]` で
+        索引を作るので、番地を持たない行を先に混ぜると辻褄が合いません。
+        後に呼ぶことで、`block` がラベルより前に出る形にもなります。
+
+        Args:
+            lst (list[dict]): 命令行・データ行のリスト。
+            segments (list[list[int]]): 走査した区間。
+
+        Returns:
+            list[dict]: コメントを反映したリスト。
+
+        Raises:
+            ValueError: 範囲外、または命令の途中を指す番地がある場合。
+        """
+        if not self._comments:
+            return lst
+
+        # 同じ番地に `org` 行と命令行が並ぶので、`opcode` を持つ方を採る。
+        rows = {}
+        for item in lst:
+            if "address" in item and "opcode" in item:
+                rows.setdefault(item["address"], item)
+        self._check_comment_addresses(rows, segments)
+
+        out = []
+        for item in lst:
+            spec = (
+                self._comments.get(item["address"])
+                if "address" in item and "opcode" in item
+                else None
+            )
+            if spec:
+                for text in spec["block"].split("\n") if spec.get("block") else []:
+                    out.append({"asm": f"; {text}".rstrip()})
+                if spec.get("line"):
+                    item["asm"] = f"{item.get('asm', '')} ; {spec['line']}"
+            out.append(item)
+        return out
+
+    def _check_comment_addresses(self, rows, segments):
+        """`comments` の番地が行に貼れるかを検査します。
+
+        **警告ではなく止めます。** `labels` の範囲外検査と同じ扱いにしてあります。
+        同じ種類の間違いなのに機構によって扱いが変わると、どちらの規則だったかを
+        毎回思い出す必要が出てきます。設定ファイルは直すたびに作り直して試すので、
+        止まってもすぐ直せます。再生成のたびに流れるログへ警告を出すと埋もれます。
+
+        Args:
+            rows (dict[int, dict]): 番地をキーにした命令行・データ行。
+            segments (list[list[int]]): 走査した区間。
+
+        Raises:
+            ValueError: 範囲外、または命令の途中を指す番地がある場合。
+        """
+        for addr in sorted(self._comments):
+            if not any(lo <= addr <= hi for lo, hi in segments):
+                where = ", ".join(f"0x{lo:04X}-0x{hi:04X}" for lo, hi in segments)
+                raise ValueError(
+                    f"comment outside the disassembled range {where}: 0x{addr:04X}"
+                )
+            if addr in rows:
+                continue
+            head = self._containing_head(rows, addr)
+            if head is None:
+                raise ValueError(f"comment at 0x{addr:04X} has no line to attach to")
+            raise ValueError(
+                f"comment at 0x{addr:04X} is inside the instruction at 0x{head:04X}"
+            )
+
+    @staticmethod
+    def _containing_head(rows, addr):
+        """`addr` を含む命令の先頭番地を返します。無ければ None。
+
+        エラーの文面に出すためのものです。「命令の途中を指している」だけでは
+        どこを直せばよいか分からないので、直すべき番地を添えます。
+
+        Args:
+            rows (dict[int, dict]): 番地をキーにした命令行・データ行。
+            addr (int): 対象の番地。
+
+        Returns:
+            int | None: 含んでいる命令の先頭番地。
+        """
+        for head in sorted((a for a in rows if a < addr), reverse=True):
+            if head + len(rows[head].get("opcode", [])) > addr:
+                return head
+            break  # 直前の命令で届かないなら、それより前でも届かない
+        return None
 
     @staticmethod
     def _dangling_rows(dangling):
@@ -937,6 +1108,7 @@ def disassemble(
     equ_names: dict | None = None,
     valid_ranges: list[list[int]] | None = None,
     raw_operand: list[int] | None = None,
+    comments: dict | None = None,
 ) -> list[str]:
     """Z80バイナリデータを逆アセンブルしてアセンブリコードのリストを返します。
 
@@ -1007,6 +1179,8 @@ def disassemble(
         d.equ_names = equ_names
     if raw_operand:
         d.raw_operand = raw_operand
+    if comments:
+        d.comments = comments
     result_data = d.exec(start_address, data, len(data))
 
     lines = []

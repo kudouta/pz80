@@ -129,6 +129,7 @@ class CliConfig:
         label_names (dict | None): `{アドレス: 名前}`（disasm のみ）。
         raw_operand (list | None): 16 ビットオペランドを数値のまま出す
             命令の番地（disasm のみ）。
+        comments (dict | None): 出力へ出すコメント（disasm のみ）。
             ラベルが `L_0066@NMI` の形になる。
         equ_names (dict | None): `{アドレス: 名前 | {"r": ..., "w": ...}}`（disasm のみ）。
             逆アセンブル範囲外の定数に `EQU` で名前を付ける。
@@ -144,6 +145,7 @@ class CliConfig:
     strmap: tuple | None = None
     label_names: dict | None = None
     raw_operand: list | None = None
+    comments: dict | None = None
     equ_names: dict | None = None
     output: Callable | None = None
 
@@ -193,6 +195,8 @@ def resolve_config(args):
                 cfg.equ_names = dict(m.equ)
             if hasattr(m, "raw_operand"):
                 cfg.raw_operand = list(m.raw_operand)
+            if hasattr(m, "comments"):
+                cfg.comments = dict(m.comments)
             if hasattr(m, "output"):
                 cfg.output = m.output
 
@@ -394,6 +398,8 @@ def command_disasm(args):
         ope.equ_names = cfg.equ_names
     if cfg.raw_operand is not None:
         ope.raw_operand = cfg.raw_operand
+    if cfg.comments is not None:
+        ope.comments = cfg.comments
 
     if cfg.valid_ranges is not None:
         # bins の隙間は walk と同じく出力から除外する。実在しないバイトを
