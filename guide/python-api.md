@@ -510,7 +510,9 @@ write_chunks([
 | `label_addresses` | 属性 | ラベルを付ける番地のリスト（設定ファイルの `entry`） |
 | `label_names` | 属性 | `{番地: 名前}`（設定ファイルの `labels`） |
 | `label_no_imm` | プロパティ | `label_names` で `{"imm": False}` にした番地の集合（読み取り専用） |
-| `equ_names` | 属性 | `{番地: 名前 \| {"r": …, "w": …, "imm": …}}`（設定ファイルの `equ`） |
+| `label_comments` | プロパティ | `label_names` の `comment` で書いた説明 `{番地: 文字列}`（読み取り専用） |
+| `equ_names` | 属性 | `{番地: 名前 \| {"name": …, "r": …, "w": …, "imm": …, "comment": …}}`（設定ファイルの `equ`）。読むと向きごとの名前 |
+| `equ_comments` | プロパティ | `equ_names` の `comment` で書いた説明 `{番地: 文字列}`（読み取り専用） |
 | `raw_operand` | プロパティ | オペランドを数値のまま出す命令の番地の集合 |
 | `comments` | プロパティ | `{番地: 文字列 \| {"line": …, "block": …}}` |
 | `valid_ranges` | プロパティ | バイナリが実在する範囲 `[[start, end], ...]`。隙間は出力から除外される |

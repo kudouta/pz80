@@ -34,11 +34,39 @@ _EQU_FALLBACK = {
 }
 
 # `labels` の値に辞書を書くときのキー。`imm` を False にすると、その番地は
-# 16 ビット即値（`LD rr, nn`）の置き換えに使われなくなる。
-_LABEL_KEYS = ("name", "imm")
+# 16 ビット即値（`LD rr, nn`）の置き換えに使われなくなる。`comment` はラベル行の
+# 前に出す説明。
+_LABEL_KEYS = ("name", "imm", "comment")
+
+# `equ` の値に辞書を書くときのキー。向きの名前（`_EQU_MODES`）に加えて、
+# `name` は書いていない向きすべての名前、`comment` は `EQU` 行に付ける説明。
+_EQU_KEYS = (*_EQU_MODES, "name", "comment")
 
 # `comments` の値に辞書を書くときのキー。`line` は行末、`block` は行の前。
 _COMMENT_KEYS = ("line", "block")
+
+
+def _check_comment_text(what, key, text):
+    """`labels` / `equ` の `comment` を検査します。空と空白だけは弾きます。
+
+    `comments` の値と同じ扱いにしてあります。同じ種類の書き間違いなのに、
+    書いた場所によって通ったり止まったりすると、どちらの規則だったかを毎回
+    思い出すことになります。
+
+    Args:
+        what (str): 文面に出す種類（"label" / "equ"）。
+        key: 設定に書かれたキー（文面に出す）。
+        text: `comment` の値。
+
+    Raises:
+        ValueError: 文字列でない、または空・空白だけの場合。
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(
+            f"Invalid {what} comment for address {key}: {text!r} "
+            f"(use a non-empty string)"
+        )
+
 
 # `data` の要素に辞書を書くときのキー。`fmt` は表の並び、`per_line` は 1 行に
 # まとめるバイト数。
@@ -50,6 +78,18 @@ _DATA_FMT_SIZES = {"b": 1, "w": 2}
 
 # データ行の疑似命令。エラーの文面を「命令の途中」と書き分けるために使う。
 _DATA_FMT_DIRECTIVES = ("db", "dw")
+
+
+def _block_rows(text):
+    """説明を `; …` の行の並びにします（改行ごとに 1 行）。無ければ空。
+
+    Args:
+        text (str | None): 説明。
+
+    Returns:
+        list[dict]: `{"asm": "; …"}` の並び。
+    """
+    return [{"asm": f"; {line}".rstrip()} for line in text.split("\n")] if text else []
 
 
 class Disasm:
@@ -82,7 +122,9 @@ class Disasm:
         self._label_no_imm = set()  # 16 ビット即値の置き換えに使わない番地
         self._raw_operand = set()  # オペランドを数値のまま出す命令の番地
         self._comments = {}  # 出力へ出すコメント {番地: {"line": …, "block": …}}
+        self._label_comments = {}  # ラベル行の前に出す説明 {番地: 文字列}
         self._equ_names = {}
+        self._equ_comments = {}  # EQU 行に付ける説明 {番地: 文字列}
 
     @property
     def equ_names(self):
@@ -104,7 +146,7 @@ class Disasm:
         参照側は**裸の名前**にします。住所を名前に残す必要はありません。
         住所は `EQU` の定義行にあり、それは手書きでも同じ場所だからです。
 
-        値は文字列か、`r` / `w` / `imm` を持つ dict です。
+        値は文字列か、`name` / `r` / `w` / `imm` / `comment` を持つ dict です。
 
             equ = {
                 0x8000: "MirrorRam",                      # 読み書き共通
@@ -123,34 +165,65 @@ class Disasm:
         lint にかけると ruff の `C408`（`Unnecessary dict() call`）が出るので、
         例は波括弧で書いています。
 
+        `name` は**書いていない向きすべての名前**です。`{"name": X}` は文字列の
+        `X` と同じ結果になり、1 つの向きだけ別の名前にする書き方ができます。
+
+            0xE000: {"name": "Port", "w": "Latch"},   # 読みと即値は Port
+
+        `comment` は `EQU` 行に付ける説明です（`equ_comments` に分けて持ちます）。
+        1 行なら最初の `EQU` 行の末尾に、複数行ならその行の前に出ます。
+
+            0xC0F4: {"name": "GameFlags", "comment": "bit0=一時停止中 bit1=デモ中"},
+
         Args:
             value (dict | None): `{アドレス: 名前 | dict}`。
 
         Raises:
-            ValueError: 名前に使えない文字、未知のキー、空の指定の場合。
+            ValueError: 名前に使えない文字、未知のキー、空の指定、名前の無い
+                指定、空の `comment` の場合。
         """
         parsed = {}
+        comments = {}
         for key, spec in (value or {}).items():
             names = {"r": spec, "w": spec} if isinstance(spec, str) else spec
             if not isinstance(names, dict) or not names:
                 raise ValueError(
                     f"Invalid equ entry for address {key}: {spec!r} "
-                    f'(use a name, or {{"r": ..., "w": ..., "imm": ...}})'
+                    f'(use a name, or {{"name": ..., "r": ..., "w": ..., "imm": ...}})'
                 )
-            unknown = set(names) - set(_EQU_MODES)
+            unknown = set(names) - set(_EQU_KEYS)
             if unknown:
                 raise ValueError(
                     f"Invalid equ keys for address {key}: {sorted(unknown)} "
-                    f"(use {' / '.join(_EQU_MODES)})"
+                    f"(use {' / '.join(_EQU_KEYS)})"
                 )
-            for name in names.values():
+            names = dict(names)
+            has_comment = "comment" in names
+            comment = names.pop("comment", None)
+            default = names.pop("name", None)
+            # `name` は書いていない向きすべての名前。即値も埋めるので、
+            # `{"name": "Port", "r": "In"}` の即値は `In` ではなく `Port` になる。
+            checked = list(names.values()) + ([default] if default is not None else [])
+            if default is not None:
+                for mode in _EQU_MODES:
+                    names.setdefault(mode, default)
+            if not names:
+                raise ValueError(
+                    f"Invalid equ entry for address {key}: {spec!r} needs a name"
+                )
+            for name in checked:
                 if not isinstance(name, str) or not _RE_LABEL_NAME.match(name):
                     raise ValueError(
                         f"Invalid label name for address {key}: {name!r} "
                         f"(use letters, digits, '_' and '.')"
                     )
-            parsed[parse_entry(key)] = dict(names)
+            addr = parse_entry(key)
+            parsed[addr] = names
+            if has_comment:
+                _check_comment_text("equ", key, comment)
+                comments[addr] = comment
         self._equ_names = parsed
+        self._equ_comments = comments
 
     def _equ_rows(self):
         """`EQU` 定義行を作ります（出力の先頭に置く）。
@@ -166,12 +239,49 @@ class Disasm:
         rows = []
         for addr in sorted(self._equ_names):
             seen = []
+            own = []
             for mode in _EQU_MODES:
                 name = self._equ_names[addr].get(mode)
                 if name and name not in seen:
                     seen.append(name)
-                    rows.append({"asm": f"{name}: EQU 0x{addr:04X}"})
+                    own.append({"asm": f"{name}: EQU 0x{addr:04X}"})
+            rows += self._with_equ_comment(own, self._equ_comments.get(addr))
         return rows
+
+    @staticmethod
+    def _with_equ_comment(own, comment):
+        """1 番地ぶんの `EQU` 行に `comment` を付けます。
+
+        付けるのは**最初の行だけ**です（読み → 書き → 即値の順で最初に出る行）。
+        1 行の説明はその行の末尾に、複数行の説明はその行の前に出します。
+        `EQU` 行は出力の先頭にまとめて並ぶので、1 行なら行末に置いたほうが
+        名前の一覧として読みやすいためです。
+
+        Args:
+            own (list[dict]): その番地の `EQU` 行（1〜3 行）。
+            comment (str | None): 説明。
+
+        Returns:
+            list[dict]: 説明を付けた行の並び。
+        """
+        if not comment:
+            return own
+        if "\n" not in comment:
+            own[0]["asm"] = f"{own[0]['asm']} ; {comment}"
+            return own
+        return _block_rows(comment) + own
+
+    @property
+    def equ_comments(self):
+        """`equ` の `comment` で書いた説明 `{アドレス: 文字列}`（読み取り専用）。
+
+        `equ_names` は `{アドレス: {"r": …, "w": …}}` の形を保つので、説明は
+        ここに分けて持っています。
+
+        Returns:
+            dict: キーは int に解決済み。
+        """
+        return self._equ_comments
 
     def _equ_text(self, addr, mode):
         """`equ` で付けた名前を返します。無ければ None。
@@ -213,12 +323,17 @@ class Disasm:
         `,` や `(` を含む名前を通すと、出力は一見正しく見えるのに
         **再アセンブルできない**状態になり、気づくのが遅れます。
 
-        値は文字列か、`name` / `imm` を持つ dict です。
+        値は文字列か、`name` / `imm` / `comment` を持つ dict です。
 
             labels = {
                 0x1200: "MsgTable",                          # 今までどおり
                 0x0020: {"name": "Rst20", "imm": False},     # 即値には使わない
+                0x0300: {"name": "PlaySound", "comment": "効果音を鳴らす"},
             }
+
+        `comment` はラベル行の前に出す説明です（`label_comments` に分けて
+        持ちます）。`\\n` ごとに 1 行です。同じ番地に `comments` の `block` も
+        あるときは、`block` → `comment` → ラベル行の順に並びます。
 
         **`imm` を False にすると、16 ビット即値（`LD rr, nn`）の置き換えから
         外れます。** 間接参照（`LD a, (nn)`）と分岐（`JP` / `CALL` / `JR` /
@@ -234,10 +349,11 @@ class Disasm:
 
         Raises:
             ValueError: 名前に使えない文字、未知のキー、`name` が無い dict、
-                `imm` が bool でない場合。
+                `imm` が bool でない、空の `comment` の場合。
         """
         parsed = {}
         no_imm = set()
+        comments = {}
         for key, spec in (value or {}).items():
             if isinstance(spec, dict):
                 unknown = set(spec) - set(_LABEL_KEYS)
@@ -259,6 +375,8 @@ class Disasm:
                         f"Invalid label imm for address {key}: {use_imm!r} "
                         f"(use True or False)"
                     )
+                if "comment" in spec:
+                    _check_comment_text("label", key, spec["comment"])
             else:
                 name, use_imm = spec, True
             if not isinstance(name, str) or not _RE_LABEL_NAME.match(name):
@@ -270,8 +388,11 @@ class Disasm:
             parsed[addr] = name
             if not use_imm:
                 no_imm.add(addr)
+            if isinstance(spec, dict) and "comment" in spec:
+                comments[addr] = spec["comment"]
         self._label_names = parsed
         self._label_no_imm = no_imm
+        self._label_comments = comments
 
     @property
     def label_no_imm(self):
@@ -285,6 +406,18 @@ class Disasm:
             set[int]: 該当する番地。
         """
         return self._label_no_imm
+
+    @property
+    def label_comments(self):
+        """`label_names` の `comment` で書いた説明 `{アドレス: 文字列}`（読み取り専用）。
+
+        `label_names` は `{アドレス: 名前}` の形を保つので、説明はここに分けて
+        持っています。
+
+        Returns:
+            dict: キーは int に解決済み。
+        """
+        return self._label_comments
 
     @property
     def raw_operand(self):
@@ -897,7 +1030,7 @@ class Disasm:
         Raises:
             ValueError: 範囲外、または命令の途中を指す番地がある場合。
         """
-        if not self._comments:
+        if not self._comments and not self._label_comments:
             return lst
 
         # 同じ番地に `org` 行と命令行が並ぶので、`opcode` を持つ方を採る。
@@ -909,16 +1042,16 @@ class Disasm:
 
         out = []
         for item in lst:
-            spec = (
-                self._comments.get(item["address"])
-                if "address" in item and "opcode" in item
-                else None
-            )
+            is_row = "address" in item and "opcode" in item
+            spec = self._comments.get(item["address"]) if is_row else None
             if spec:
-                for text in spec["block"].split("\n") if spec.get("block") else []:
-                    out.append({"asm": f"; {text}".rstrip()})
+                out += _block_rows(spec.get("block"))
                 if spec.get("line"):
                     item["asm"] = f"{item.get('asm', '')} ; {spec['line']}"
+            # `labels` の `comment` は `comments` の `block` の後、ラベル行の直前。
+            # `block` を節の見出しに使っている設定があるため（依頼元の指定）。
+            if is_row and "label" in item:
+                out += _block_rows(self._label_comments.get(item["address"]))
             out.append(item)
         return out
 
@@ -976,8 +1109,7 @@ class Disasm:
             break  # 直前の命令で届かないなら、それより前でも届かない
         return None
 
-    @staticmethod
-    def _dangling_rows(dangling):
+    def _dangling_rows(self, dangling):
         """定義行を置けなかったラベルを `EQU` で定義する行を作ります。
 
         `JP L_8000` のように**行の無い番地**を指す参照は前からありました。
@@ -989,16 +1121,21 @@ class Disasm:
         付けた名前とは別の行になりますが、pz80 は値の同じ `EQU` を別名で
         定義できるので衝突しません。
 
+        `labels` で命令の途中に名前を付けた場合もここに来ます。その `comment` は
+        この `EQU` 行の前に出します。ラベルが出る場所に説明も出す形にそろえるため
+        （依頼元の判断。エラーにすると、ラベルは書けるのに説明は書けなくなる）。
+
         Args:
             dangling (dict): `{アドレス: ラベル名}`（コロンなし）。
 
         Returns:
             list[dict]: `{"asm": "L_8000: EQU 0x8000"}` の並び。アドレス順。
         """
-        return [
-            {"asm": f"{name}: EQU 0x{addr:04X}"}
-            for addr, name in sorted(dangling.items())
-        ]
+        rows = []
+        for addr, name in sorted(dangling.items()):
+            rows += _block_rows(self._label_comments.get(addr))
+            rows.append({"asm": f"{name}: EQU 0x{addr:04X}"})
+        return rows
 
     def _scan(self, mem, start, end):
         """指定範囲を走査して命令行・データ行のリストを返します。
@@ -1460,7 +1597,8 @@ def disassemble(
             `label_addresses` はこの置き換えの対象になりません。
             値に `{"name": 名前, "imm": False}` と書くと、**その番地は 16 ビット
             即値の置き換えから外れます**（間接参照と分岐は名前のまま）。RST ベクタ
-            のような小さい番地に名前を付けるときに要ります。
+            のような小さい番地に名前を付けるときに要ります。`"comment"` を書くと
+            ラベル行の前に説明が出ます。
             **逆アセンブル範囲外のアドレスは指定できません**（定義行を置く場所が
             無いため）。RAM / I/O は `equ_names` を使ってください。Defaults to None.
         equ_names (dict | None, optional): `{アドレス: 名前}` または
@@ -1468,7 +1606,9 @@ def disassemble(
             （RAM・I/O・ハードウェアレジスタ）に名前を付けます。出力の先頭に
             `MirrorRam: EQU 0x8000` を置き、参照側は**裸の名前**になります
             （`L_xxxx@` は付きません）。read と write で役割が違うレジスタは
-            命令の形から向きを判定して名前を選びます。Defaults to None.
+            命令の形から向きを判定して名前を選びます。`"name"` は書いていない
+            向きすべての名前、`"comment"` は `EQU` 行に付ける説明です。
+            Defaults to None.
         valid_ranges (list[list[int]] | None, optional): バイナリが実在する
             アドレス範囲 `[[開始, 終了], ...]`（両端含む）。`bins` で複数ファイルを
             別々の番地に置いたときの**隙間を出力から除外**します。未指定なら
