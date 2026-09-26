@@ -124,13 +124,14 @@ class CliConfig:
         start (int): 開始アドレス（walk ではメインエントリポイントも兼ねる）。
         entries (list): 追加エントリポイント。未 parse の生値（シンボル名も可）。
         m1_handler (Callable | None): M1サイクル復号ハンドラー。
-        datamap (list | None): データ領域（disasm のみ）。
+        datamap (list | None): データ領域（disasm のみ）。要素は `[開始, 終了]`
+            か `{"range": …, "fmt": …, "per_line": …}`。解釈は `Disasm.datamap`。
         strmap (tuple | None): キャラクターコード表（disasm のみ）。
         label_names (dict | None): `{アドレス: 名前}`（disasm のみ）。
+            ラベルが `L_0066@NMI` の形になる。
         raw_operand (list | None): 16 ビットオペランドを数値のまま出す
             命令の番地（disasm のみ）。
         comments (dict | None): 出力へ出すコメント（disasm のみ）。
-            ラベルが `L_0066@NMI` の形になる。
         equ_names (dict | None): `{アドレス: 名前 | {"r": ..., "w": ...}}`（disasm のみ）。
             逆アセンブル範囲外の定数に `EQU` で名前を付ける。
         output (Callable | None): カスタム出力関数（disasm のみ）。
@@ -419,6 +420,10 @@ def command_disasm(args):
 
     # 逆アセンブル
     out = ope.exec(start, images[start:], size - start)
+    # 出力は得られているが、設定どおりにならなかった箇所。`-o` でファイルへ
+    # 書く場合も見えるように stderr へ出す。
+    for text in ope.warnings:
+        print(f"Warning: {text}", file=sys.stderr)
 
     if args.output is not None:
         # asm.exec() はソースを UTF-8 で読むため、逆アセンブル結果も UTF-8 で書く。

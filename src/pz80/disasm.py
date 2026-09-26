@@ -40,6 +40,17 @@ _LABEL_KEYS = ("name", "imm")
 # `comments` の値に辞書を書くときのキー。`line` は行末、`block` は行の前。
 _COMMENT_KEYS = ("line", "block")
 
+# `data` の要素に辞書を書くときのキー。`fmt` は表の並び、`per_line` は 1 行に
+# まとめるバイト数。
+_DATA_KEYS = ("range", "fmt", "per_line")
+
+# `fmt` に書ける型と、それが消費するバイト数。この 2 つだけ。`dd` のような
+# 4 バイト型は Z80 のデータ表に出てこない。
+_DATA_FMT_SIZES = {"b": 1, "w": 2}
+
+# データ行の疑似命令。エラーの文面を「命令の途中」と書き分けるために使う。
+_DATA_FMT_DIRECTIVES = ("db", "dw")
+
 
 class Disasm:
     """Z80逆アセンブラクラス"""
@@ -48,6 +59,8 @@ class Disasm:
         """Disasmクラスを初期化します。"""
         self.cpu = z80.Z80()
         self._datamap = []  # 逆アセンブル時にデーターとして扱うアドレス範囲テーブル
+        self._data_fmt = []  # 書式を指定した範囲 [(開始, 終了, 型の並び, 1行のバイト数)]
+        self.warnings = []  # 設定と実データの食い違い。CLI が stderr へ出す
         self._valid_ranges = None  # バイナリが実在する範囲。None なら全域
         # ラベル参照を拾う。`@名前` は省略可なので、接尾辞の無い従来の出力も通る。
         #
@@ -517,12 +530,125 @@ class Disasm:
 
     @datamap.setter
     def datamap(self, p):
-        """データマップセッター。
+        """データ範囲を検証して設定します。
+
+        要素は `[開始, 終了]`（両端含む・今までどおり全バイト `db`）か、
+        `range` / `fmt` / `per_line` を持つ dict です。
+
+            data = [
+                [0x1000, 0x10FF],                              # 全部 db
+                {"range": [0x1100, 0x113F], "fmt": "b w b"},   # db, dw, db の繰り返し
+                {"range": [0x1140, 0x1149], "fmt": "w"},       # dw の並び
+                {"range": [0x1200, 0x12FF], "fmt": "b", "per_line": 8},
+            ]
+
+        **`fmt` は範囲の先頭から繰り返す型の並びです。** `w` はリトルエンディアンの
+        2 バイトを `dw` 1 行にまとめ、その値が `equ` や `labels` の番地と一致すれば
+        名前に置き換えます。一致しなければ `dw 0x1200` と数値で出します（表の中には
+        名前を付けていない番地が普通にあるので、ここで警告は出しません）。
+
+        `per_line` は `db` を 1 行にまとめるバイト数です。音符のような長いバイト列を
+        読むための指定なので、**まとめた行には `; [文字]` の注釈を出しません**。
+
+        `datamap` が返すのは今までどおり `[[開始, 終了], ...]` です。書式は別に
+        持っているので、範囲だけを見ている既存の呼び出し側は影響を受けません。
 
         Args:
-            p (list): データ範囲のリスト。
+            p (list | None): データ範囲のリスト。
+
+        Raises:
+            ValueError: 範囲の形式が不正、未知のキー、`range` が無い dict、
+                `fmt` に `b` / `w` 以外が入る、`per_line` が正の整数でない場合。
         """
-        self._datamap = p
+        ranges = []
+        fmts = []
+        for entry in p or []:
+            rng, tokens, per_line = self._parse_data_entry(entry)
+            ranges.append(rng)
+            if tokens or per_line:
+                fmts.append((rng[0], rng[1], tokens, per_line))
+        self._datamap = ranges
+        self._data_fmt = fmts
+
+    @staticmethod
+    def _parse_data_entry(entry):
+        """`data` の 1 要素を `([開始, 終了], 型の並び, 1行のバイト数)` に直します。
+
+        開始 > 終了 はここでは弾きません。CLI が今までどおり自分の文面で報告する
+        ため（`Error: Invalid data range in config`）、検査の場所を動かしません。
+
+        Args:
+            entry (list | tuple | dict): `data` の 1 要素。
+
+        Returns:
+            tuple: `([開始, 終了], tuple | None, int | None)`。
+
+        Raises:
+            ValueError: 形式が不正な場合。
+        """
+        fmt = per_line = None
+        if isinstance(entry, dict):
+            unknown = set(entry) - set(_DATA_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"Invalid data keys: {sorted(unknown)} "
+                    f"(use {' / '.join(_DATA_KEYS)})"
+                )
+            if "range" not in entry:
+                raise ValueError(f'Invalid data entry: {entry!r} needs "range"')
+            rng = entry["range"]
+            fmt = entry.get("fmt")
+            per_line = entry.get("per_line")
+        else:
+            rng = entry
+
+        try:
+            lo, hi = rng
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Invalid data range: {rng!r} (use [start, end])"
+            ) from None
+        if not isinstance(lo, int) or not isinstance(hi, int):
+            raise ValueError(f"Invalid data range: {rng!r} (use [start, end])")
+
+        where = f"0x{lo:04X}-0x{hi:04X}"
+        tokens = None
+        if fmt is not None:
+            tokens = tuple(fmt.split()) if isinstance(fmt, str) else ()
+            if not tokens or any(t not in _DATA_FMT_SIZES for t in tokens):
+                raise ValueError(
+                    f"Invalid data fmt for {where}: {fmt!r} "
+                    f"(use {' / '.join(_DATA_FMT_SIZES)} separated by spaces)"
+                )
+        # bool は int なので明示的に外す。`per_line: True` は書き間違いだが、
+        # 通すと 1 バイトずつまとめる指定として黙って効いてしまう。
+        if per_line is not None and (
+            isinstance(per_line, bool) or not isinstance(per_line, int) or per_line < 1
+        ):
+            raise ValueError(
+                f"Invalid data per_line for {where}: {per_line!r} "
+                f"(use a positive integer)"
+            )
+        return [lo, hi], tokens, per_line
+
+    def _check_data_fmt(self):
+        """`fmt` で範囲を割り切れない指定を `warnings` に記録します。
+
+        **止めません。** 表の終端の見積もりが 1 要素ずれることは解析中によくあり、
+        そこで出力そのものが得られなくなると、ずれを直すのに使う出力が無くなります。
+        残りは `db` で出すので、再アセンブルできる出力は必ず得られます。
+        """
+        for lo, hi, tokens, _per_line in self._data_fmt:
+            if not tokens:
+                continue
+            cycle = sum(_DATA_FMT_SIZES[t] for t in tokens)
+            rest = (hi - lo + 1) % cycle
+            if rest:
+                self.warnings.append(
+                    f'data fmt "{" ".join(tokens)}" does not fit '
+                    f"0x{lo:04X}-0x{hi:04X}: {rest} trailing "
+                    f"byte{'s' if rest > 1 else ''} emitted as db"
+                )
 
     @property
     def valid_ranges(self):
@@ -698,6 +824,8 @@ class Disasm:
                 f"0x{start:04X}-0x{end:04X} (nothing to disassemble)"
             )
         self._check_label_names_in_range(segments)
+        self.warnings = []
+        self._check_data_fmt()
 
         # 区間ごとに `org` を出し直す。隙間を飛ばしたまま番地を進めないと、
         # 再アセンブルしたときに後続が隙間の分だけ手前へ詰まる。
@@ -707,6 +835,9 @@ class Disasm:
             lst += self._scan(mem, seg_start, seg_end)
 
         dangling = self._attach_labels(lst)
+        # `per_line` のまとめも `_attach_labels` の後。ラベルの付いた行で切るので、
+        # 参照から見つかったラベルまで含めて 1 行の途中に埋もれない。
+        lst = self._group_data_lines(lst)
         # コメントは `_attach_labels` の後。番地を持たない行を混ぜるので索引作りの
         # 後でなければならず、`block` をラベルより前に出すためにもこの順が要る。
         lst = self._apply_comments(lst, segments)
@@ -817,8 +948,12 @@ class Disasm:
             head = self._containing_head(rows, addr)
             if head is None:
                 raise ValueError(f"comment at 0x{addr:04X} has no line to attach to")
+            # `fmt` の `w` は 2 バイトを 1 行にするので、上位バイトを指すと
+            # ここに来る。「命令の途中」と書くと嘘になるのでニーモニックで言う。
+            mnemonic = rows[head].get("asm", "").split(" ", 1)[0].lower()
+            kind = mnemonic if mnemonic in _DATA_FMT_DIRECTIVES else "instruction"
             raise ValueError(
-                f"comment at 0x{addr:04X} is inside the instruction at 0x{head:04X}"
+                f"comment at 0x{addr:04X} is inside the {kind} at 0x{head:04X}"
             )
 
     @staticmethod
@@ -881,15 +1016,9 @@ class Disasm:
         while adr <= end:
             # データ領域はオペコードフェッチではないため M1 復号せず生バイトで出力する
             if any(r[0] <= adr <= r[1] for r in self.datamap):
-                raw = mem[adr]
-                lst.append(
-                    {
-                        "address": adr,
-                        "opcode": [raw],
-                        "asm": f"db 0x{raw:02X} ; [{self.cpu.strmap[raw]}]",
-                    }
-                )
-                adr += 1
+                row, step = self._data_row(mem, adr, end)
+                lst.append(row)
+                adr += step
                 continue
 
             opcode, asm = self._decode_at(mem, adr, end)
@@ -908,6 +1037,193 @@ class Disasm:
             lst.append({"address": adr, "opcode": opcode, "asm": asm})
             adr += len(opcode)
         return lst
+
+    def _data_row(self, mem, adr, end):
+        """データ領域の 1 行を作ります。`(行, 進めるバイト数)` を返します。
+
+        `fmt` で `w` が来ている位置では 2 バイトを `dw` 1 行にします。それ以外は
+        今までどおり 1 バイトの `db` に `; [文字]` を添えます。
+
+        Args:
+            mem (list): 64KB のメモリイメージ。
+            adr (int): 対象アドレス。
+            end (int): 走査範囲の終端（これを越えるバイトは読まない）。
+
+        Returns:
+            tuple[dict, int]: 行と消費バイト数（1 か 2）。
+        """
+        entry = self._data_fmt_at(adr)
+        if entry is not None:
+            lo, hi, tokens, _per_line = entry
+            if self._fmt_kind(adr - lo, tokens, hi - lo + 1) == "w":
+                if adr + 1 <= min(hi, end):
+                    return {
+                        "address": adr,
+                        "opcode": [mem[adr], mem[adr + 1]],
+                        "asm": self._dw_text(mem[adr], mem[adr + 1]),
+                    }, 2
+                # 区間の終端で切られると 2 バイト読めない。`valid_ranges` の隙間や
+                # イメージの末尾に表の終端を重ねた場合で、`db` に落として続ける。
+                self.warnings.append(
+                    f"data fmt w at 0x{adr:04X} needs 2 bytes "
+                    f"but the range ends at 0x{min(hi, end):04X}: emitted as db"
+                )
+
+        raw = mem[adr]
+        return {
+            "address": adr,
+            "opcode": [raw],
+            "asm": f"db 0x{raw:02X} ; [{self.cpu.strmap[raw]}]",
+        }, 1
+
+    def _data_fmt_at(self, adr):
+        """`adr` を含む書式付きの `data` 要素を返します。無ければ None。
+
+        Args:
+            adr (int): 対象アドレス。
+
+        Returns:
+            tuple | None: `(開始, 終了, 型の並び, 1行のバイト数)`。
+        """
+        for entry in self._data_fmt:
+            if entry[2] and entry[0] <= adr <= entry[1]:
+                return entry
+        return None
+
+    @staticmethod
+    def _fmt_kind(offset, tokens, size):
+        """範囲の先頭から `offset` バイト目に来る型を返します。
+
+        型の並びは範囲の先頭から繰り返します。**割り切れない残りは `db`** に
+        します（`_check_data_fmt()` が警告を出す）。区間で切られて型の境目に
+        乗っていない位置も `db` にします。
+
+        Args:
+            offset (int): 範囲の先頭からのバイト数。
+            tokens (tuple): 型の並び（`("b", "w", "b")` など）。
+            size (int): 範囲のバイト数。
+
+        Returns:
+            str: "b" または "w"。
+        """
+        cycle = sum(_DATA_FMT_SIZES[t] for t in tokens)
+        if offset >= size - size % cycle:
+            return "b"
+        pos = offset % cycle
+        at = 0
+        for token in tokens:
+            if at == pos:
+                return token
+            at += _DATA_FMT_SIZES[token]
+        return "b"
+
+    def _dw_text(self, lo, hi):
+        """`dw` 行の文字列を作ります。名前が付いていればそれを使います。
+
+        探す順は `equ` → `labels` → 数値です。**一致しなければ数値のまま**出します。
+        表の中には名前を付けていない番地が普通にあり（スタックの番地など）、
+        そこで警告を出すと正しい指定でも警告が並びます。`fmt` を書いた本人が
+        出力を見れば分かる、というのが依頼元の判断でした。
+
+        `labels` の `imm: False` はここに効きません。あれは `LD rr, nn` の即値が
+        定数かもしれない場合の指定で、**表の中の `dw` は番地そのもの**です。
+
+        Args:
+            lo (int): 下位バイト。
+            hi (int): 上位バイト。
+
+        Returns:
+            str: `dw L_1200@Song0` / `dw SndVolume` / `dw 0x1200`。
+        """
+        addr = (hi << 8) | lo
+        name = self._equ_text(addr, "imm")
+        if not name and addr in self.label_names:
+            name = self._label_text(addr)
+        return f"dw {name}" if name else f"dw 0x{addr:04X}"
+
+    def _group_data_lines(self, lst):
+        """`per_line` の範囲で 1 バイトの `db` 行をまとめた新しいリストを返します。
+
+        **`_attach_labels()` の後に呼んでください。** ラベルの付いた行で必ず切るので、
+        参照から見つかったラベルも 1 行の途中に埋もれません。走査の中でまとめると
+        参照側が見つかる前なので、この判断ができません。
+
+        コメントを付けた番地でも切ります（依頼元の指定）。切った先が新しい行の
+        先頭になるため、コメントは今までどおりその行に付きます。
+
+        Args:
+            lst (list[dict]): 命令行・データ行のリスト。
+
+        Returns:
+            list[dict]: `db` をまとめたリスト。まとめる指定が無ければそのまま。
+        """
+        if not any(entry[3] for entry in self._data_fmt):
+            return lst
+
+        out = []
+        group = []  # まとめている行
+        limit = 0  # まとめる上限。0 ならまとめていない
+        for item in lst:
+            per_line = self._per_line_of(item)
+            if (
+                group
+                and per_line == limit
+                and len(group) < limit
+                and "label" not in item
+                and item["address"] not in self._comments
+            ):
+                group.append(item)
+                continue
+            if group:
+                out.append(self._merge_data_rows(group))
+                group, limit = [], 0
+            if per_line is None:
+                out.append(item)
+            else:
+                group, limit = [item], per_line
+        if group:
+            out.append(self._merge_data_rows(group))
+        return out
+
+    def _per_line_of(self, item):
+        """`item` が `per_line` 指定の 1 バイト `db` 行なら、そのバイト数を返します。
+
+        `dw` 行（2 バイト）と `org` 行（`opcode` 無し）はここで外れるので、
+        まとめる対象になりません。区間の隙間には必ず `org` 行が挟まるので、
+        番地が飛んだ行同士がまとまることもありません。
+
+        Args:
+            item (dict): 行。
+
+        Returns:
+            int | None: 1 行にまとめるバイト数。対象外なら None。
+        """
+        if "address" not in item or len(item.get("opcode", ())) != 1:
+            return None
+        for lo, hi, _tokens, per_line in self._data_fmt:
+            if per_line and lo <= item["address"] <= hi:
+                return per_line
+        return None
+
+    @staticmethod
+    def _merge_data_rows(group):
+        """1 バイトの `db` 行をまとめて 1 行にします（先頭の行を書き換えます）。
+
+        先頭の行に足していくので、そこに付いたラベルは残ります。**`; [文字]` の
+        注釈は落とします**（依頼元の指定。音符のようなデータを読むための機能なので、
+        まとめた行に文字注釈は要らない）。
+
+        Args:
+            group (list[dict]): まとめる行。先頭が新しい行になる。
+
+        Returns:
+            dict: まとめた行。
+        """
+        head = group[0]
+        opcode = [row["opcode"][0] for row in group]
+        head["opcode"] = opcode
+        head["asm"] = "db " + ", ".join(f"0x{b:02X}" for b in opcode)
+        return head
 
     def _decode_at(self, mem, adr, end):
         """1命令を復号します。最長の4バイトから順に1バイトまでマッチを試みます。
@@ -1115,9 +1431,15 @@ def disassemble(
     Args:
         data (bytes): 逆アセンブル対象のバイナリデータ
         start_address (int, optional): 開始アドレス. Defaults to 0.
-        data_regions (list[list[int]] | None, optional): データ領域のリスト。
+        data_regions (list | None, optional): データ領域のリスト。
             各要素は [開始アドレス, 終了アドレス]（両端含む）。
-            指定範囲は命令として解釈されず db として出力される。Defaults to None.
+            指定範囲は命令として解釈されず db として出力される。
+            `{"range": [開始, 終了], "fmt": "b w b", "per_line": 8}` と辞書で書くと、
+            `fmt` の型の並びを範囲の先頭から繰り返します（`w` は 2 バイトを `dw`
+            1 行にまとめ、値に名前が付いていれば置き換える）。`per_line` は `db` を
+            1 行にまとめるバイト数です。`fmt` で範囲を割り切れないときの警告は
+            この関数では受け取れません。要るなら `Disasm` を使い `warnings` を
+            読んでください。Defaults to None.
         m1_handler (callable | None, optional): M1サイクル復号ハンドラー。
             (address: int, byte: int) -> int の形式。Defaults to None.
         label_addresses (list[int | str] | None, optional): 強制的にラベルを
@@ -1157,6 +1479,9 @@ def disassemble(
             同じ値が、ある場所では番地・別の場所では定数、という混在を 1 か所ずつ
             潰すためのものです。`labels` の `imm` は番地ごと、こちらは命令ごとの
             指定になります。Defaults to None.
+        comments (dict | None, optional): `{番地: 文字列}` または
+            `{番地: {"line": 行末, "block": 行の前}}`。出力へコメントを出します。
+            範囲外や命令の途中を指すと `ValueError` になります。Defaults to None.
 
     Returns:
         list[str]: アセンブリコードの各行のリスト
