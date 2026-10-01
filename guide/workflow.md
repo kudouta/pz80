@@ -26,6 +26,7 @@ INT_ON:  EQU 0xE000         ; 割り込み許可（書き込み）
         org 0x0000
         di
         ld   sp, 0xC400
+        im   1
         jp   main
 
         org 0x0018           ; RST 0x18: 直後に置いた表で分岐する
@@ -129,7 +130,7 @@ pz80 walk -i practice.bin -e NMI
 
 ```python
 data = [
-    [0x0007, 0x0017],
+    [0x0009, 0x0017],
     [0x0023, 0x0065],
     [0x0071, 0x018F],
     [0x01AA, 0x01BA],
@@ -152,7 +153,7 @@ pz80 walk -i practice.bin -e NMI --auto-entry
 # auto-entry: [jp-indirect] @0x01CB table=0x01CC stride=2 -> 0x0200 0x0201 0x0202
 # auto-entry: entry = -e 0x0000 -e 0x0018 -e 0x0066 -e 0x01A3 -e 0x01AA -e 0x01AE -e 0x01B3 -e 0x0200 -e 0x0201 -e 0x0202
 data = [
-    [0x0007, 0x0017],
+    [0x0009, 0x0017],
     [0x0023, 0x0065],
     [0x0071, 0x018F],
     [0x019D, 0x01A2],
@@ -216,7 +217,7 @@ pz80 disasm -i practice.bin -c practice_cfg.py
 entry = ["NMI", 0x0018, 0x01A3, 0x01AA, 0x01AE, 0x01B3, 0x0200, 0x0201, 0x0202]
 
 data = [
-    [0x0007, 0x0017],
+    [0x0009, 0x0017],
     [0x0023, 0x0065],
     [0x0071, 0x018F],
     {"range": [0x019D, 0x01A2], "fmt": "w"},        # RST 0x18 直後の表
@@ -287,6 +288,7 @@ IntOn: EQU 0xE000
 org 0x0000
     DI
     LD sp, 0xC400
+    IM 1
     JP L_0190@Main
     ...
 L_0190@Main:

@@ -19,7 +19,7 @@
 C:\>pz80
 usage: pz80 [-h] {disasm,walk,asm} ...
 
-Z80 assembler & disassembler v0.4.66
+Z80 assembler & disassembler v0.4.67
 
 positional arguments:
   {disasm,walk,asm}
@@ -145,7 +145,7 @@ pz80 disasm -i practice.bin -c practice_cfg.py
 
 ```python
 data = [
-    [0x0007, 0x0017],
+    [0x0009, 0x0017],
     [0x0023, 0x0065],
     [0x0071, 0x018F],
     [0x01AA, 0x01BA],
@@ -200,7 +200,7 @@ pz80 walk -i practice.bin -e NMI --auto-entry
 # auto-entry: [jp-indirect] @0x01CB table=0x01CC stride=2 -> 0x0200 0x0201 0x0202
 # auto-entry: entry = -e 0x0000 -e 0x0018 -e 0x0066 -e 0x01A3 -e 0x01AA -e 0x01AE -e 0x01B3 -e 0x0200 -e 0x0201 -e 0x0202
 data = [
-    [0x0007, 0x0017],
+    [0x0009, 0x0017],
     [0x0023, 0x0065],
     [0x0071, 0x018F],
     [0x019D, 0x01A2],

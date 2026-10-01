@@ -373,14 +373,21 @@ def command_asm(args):
         sys.exit(1)
 
 
-def command_disasm(args):
-    """逆アセンブラコマンドハンドラ。
+def _build_disasm(cfg):
+    """設定を配線した Disasm を作ります。
+
+    設定の値の検査は Disasm のセッターが行います（ラベル名の書式、`data` の形、
+    `equ` の辞書のキーなど）。
 
     Args:
-        args (argparse.Namespace): コマンドライン引数。
-    """
-    cfg = resolve_config(args)
+        cfg (CliConfig): 解釈済みの設定。
 
+    Returns:
+        disasm.Disasm: 設定を反映した逆アセンブラ。
+
+    Raises:
+        ValueError: 設定の値が不正な場合。
+    """
     ope = disasm.Disasm()
     if cfg.datamap is not None:
         ope.datamap = cfg.datamap
@@ -406,6 +413,24 @@ def command_disasm(args):
         # bins の隙間は walk と同じく出力から除外する。実在しないバイトを
         # `nop` の列として読んでいたのを揃えた（詳細は Disasm.valid_ranges）。
         ope.valid_ranges = cfg.valid_ranges
+    return ope
+
+
+def command_disasm(args):
+    """逆アセンブラコマンドハンドラ。
+
+    Args:
+        args (argparse.Namespace): コマンドライン引数。
+    """
+    cfg = resolve_config(args)
+
+    # 設定の誤りは Disasm が ValueError で知らせる。asm / walk と同じく
+    # `Error:` の 1 行で止め、トレースバックは出さない。
+    try:
+        ope = _build_disasm(cfg)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     output = cfg.output or output_default
     images, size, start = cfg.images, cfg.size, cfg.start
@@ -418,8 +443,13 @@ def command_disasm(args):
             )
             sys.exit(1)
 
-    # 逆アセンブル
-    out = ope.exec(start, images[start:], size - start)
+    # 逆アセンブル。範囲に関わる設定（範囲外の labels / comments、命令や dw の
+    # 途中を指す comments など）は、範囲が決まるここで初めて検査される。
+    try:
+        out = ope.exec(start, images[start:], size - start)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     # 出力は得られているが、設定どおりにならなかった箇所。`-o` でファイルへ
     # 書く場合も見えるように stderr へ出す。
     for text in ope.warnings:
@@ -486,19 +516,20 @@ def _auto_detect_entries(cfg, seed_entries):
     """
     from pz80._auto_entry import AutoEntry
 
+    # 抽出も m1_handler を通して ROM を読むので、walk 本体と同じく
+    # ValueError は `Error:` の 1 行で止める。
     try:
         seed = [parse_entry(e) for e in seed_entries]
+        ae = AutoEntry(
+            cfg.images,
+            start=cfg.start,
+            m1_handler=cfg.m1_handler,
+            valid_ranges=cfg.valid_ranges,
+        )
+        found, findings = ae.run(seed_entries=seed)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    ae = AutoEntry(
-        cfg.images,
-        start=cfg.start,
-        m1_handler=cfg.m1_handler,
-        valid_ranges=cfg.valid_ranges,
-    )
-    found, findings = ae.run(seed_entries=seed)
 
     for f in findings:
         print(f"# auto-entry: {f.format()}")

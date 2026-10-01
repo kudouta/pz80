@@ -67,6 +67,7 @@ data_regions = walk(binary, extra_entries=["NMI"])
 | **[設定ファイル](guide/config.md)** | `-c` で渡す設定ファイルの全キー（`bins` / `data` / `labels` / `equ` / `comments` など） |
 | **[アセンブリ言語](guide/language.md)** | `.asm` に書ける構文。数値・疑似命令・条件アセンブル・ラベル・式 |
 | **[Python API](guide/python-api.md)** | モジュールとして使うときの関数・クラスと戻り値 |
+| **[変更履歴](CHANGELOG.md)** | 版ごとの、利用者から見た変化 |
 
 ## ソースコード内の言語 / Language in the source
 
