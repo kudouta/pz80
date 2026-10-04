@@ -130,7 +130,7 @@ class CliConfig:
         label_names (dict | None): `{アドレス: 名前}`（disasm のみ）。
             ラベルが `L_0066@NMI` の形になる。
         raw_operand (list | None): 16 ビットオペランドを数値のまま出す
-            命令の番地（disasm のみ）。
+            命令のアドレス（disasm のみ）。
         comments (dict | None): 出力へ出すコメント（disasm のみ）。
         equ_names (dict | None): `{アドレス: 名前 | {"r": ..., "w": ...}}`（disasm のみ）。
             逆アセンブル範囲外の定数に `EQU` で名前を付ける。
@@ -490,8 +490,8 @@ def output_default(dis, sw):
                 indent = "    " if p.get("opcode") else ""
                 print(f"{indent}{p['asm']}")
         else:
-            # EQU の定義行は番地を持たない（出力の先頭に置く前書き）。
-            # 0x0000 と表示すると 0 番地の行と紛らわしいので空欄にする。
+            # EQU の定義行はアドレスを持たない（出力の先頭に置く前書き）。
+            # 0x0000 と表示すると アドレス 0 の行と紛らわしいので空欄にする。
             addr_str = f"0x{p['address']:04X}" if "address" in p else " " * 6
             op_bytes = p.get("opcode", [])
             op_str = " ".join(f"{b:02X}" for b in op_bytes)

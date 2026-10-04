@@ -86,7 +86,7 @@ class Finding:
 
         テーブルが無い定型句（`rst-vector` / `sp-ret`）でも、分岐先が分かって
         いれば `-> ...` を出します。以前は `note` だけを見ていたため
-        `rst-vector` の行が `@0x0006` で終わり、ベクタ番地が読めませんでした。
+        `rst-vector` の行が `@0x0006` で終わり、ベクタアドレスが読めませんでした。
         """
         if self.base is None:
             targets = " ".join(f"0x{t:04X}" for t in self.targets)
@@ -125,7 +125,7 @@ class AutoEntry:
         self.order = sorted(self.amap)
         self.index = {a: i for i, a in enumerate(self.order)}
 
-        # 直後へ戻らないと分かった命令の番地（RST 直後にテーブルを埋め込む形）。
+        # 直後へ戻らないと分かった命令のアドレス（RST 直後にテーブルを埋め込む形）。
         # `trace()` に渡して、テーブルのバイトをコードにしないために使う。
         # `run()` のあと呼び出し側が読む（`__main__` が `walk()` へ渡す）。
         self.no_fallthrough = set()
@@ -180,7 +180,7 @@ class AutoEntry:
         return result
 
     def _ensure_mapped(self, addr):
-        """`amap` に無い番地なら、そこから走査し直して埋める。
+        """`amap` に無いアドレスなら、そこから走査し直して埋める。
 
         **先頭からの走査が作った命令境界に、分岐先が乗るとは限りません**
         （`walk.sweep_from()`）。`trace()` は `resweep` でこれを回避しますが、
@@ -316,7 +316,7 @@ class AutoEntry:
     # ------------------------------------------------- テーブル基底の逆算パターン
 
     def _bases_from_ram(self, ram):
-        """RAM 番地 ram に書き込まれる定数ポインタを ROM 全体から探す。
+        """RAM アドレス ram に書き込まれる定数ポインタを ROM 全体から探す。
 
         `LD hl,mmmm` → `LD (ram),hl` 形式と、
         `LD a,LL` → `LD (ram),a` / `LD a,HH` → `LD (ram+1),a` のバイト分割形式に対応。
@@ -464,7 +464,7 @@ class AutoEntry:
     def _p_inline_after_call(self, code, heads):
         """CALL 直後にテーブルを埋め込む形式。
 
-        呼ばれる側が POP hl / POP de で戻り番地を取り出していれば、
+        呼ばれる側が POP hl / POP de で戻りアドレスを取り出していれば、
         CALL 命令の直後がテーブル本体になる。
         """
         pop_routines = {
@@ -487,10 +487,10 @@ class AutoEntry:
         return out
 
     def _rst_dispatches_via_table(self, vec, heads):
-        """RST のベクタ先が「戻り番地を取り出してテーブルで飛ぶ」形かを返す。
+        """RST のベクタ先が「戻りアドレスを取り出してテーブルで飛ぶ」形かを返す。
 
         `inline-after-call` と同じ判定をベクタ先に当てはめたもの。`POP hl`
-        （`ix` / `iy` も可）で戻り番地を取り、`JP (hl)` に至れば、その RST の
+        （`ix` / `iy` も可）で戻りアドレスを取り、`JP (hl)` に至れば、その RST の
         直後がテーブル本体になる。
 
         Args:
@@ -520,7 +520,7 @@ class AutoEntry:
         """RST 直後にテーブルを埋め込む形式。
 
         `classify_instruction()` は RST を「呼んで次の命令へ戻る」ものとして
-        扱うため、直後のテーブルを命令として読んでしまう。ベクタ先が戻り番地を
+        扱うため、直後のテーブルを命令として読んでしまう。ベクタ先が戻りアドレスを
         取り出す形なら戻ってこないので、`no_fallthrough` に site を積んで
         追跡側に伝える（`trace()` の `stop_after`）。これでテーブルのバイトは
         コードにならず、自然にデータへ落ちる。

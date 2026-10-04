@@ -47,7 +47,7 @@ class Asm:
                 ラベル行: {"line": int, "file": str|None, "label": str, "base": int, "offset": int}
                 消費行: {"line": int, "file": str|None, "asm": list, "kind": str}
                     kind は "equ"/"org"/"if"/"elseif"/"else"/"endif"/"skipped" のいずれか。
-                    番地を占有しないため "opcode"/"base"/"offset" を持たない。
+                    アドレスを占有しないため "opcode"/"base"/"offset" を持たない。
         """
         return self.assemble_chunks([(file, lines)])
 

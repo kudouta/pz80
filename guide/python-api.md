@@ -46,7 +46,7 @@ source_code = """
 binary_data = assemble(source_code)
 ```
 
-`assemble()` はソースの文字列のほか、後述の**チャンクのリスト**も受け付けます。どちらの場合も、置いた範囲の最小の番地から最大の番地までを返します。`ORG` で飛ばした範囲は `0x00` で埋まります。
+`assemble()` はソースの文字列のほか、後述の**チャンクのリスト**も受け付けます。どちらの場合も、置いた範囲の最小のアドレスから最大のアドレスまでを返します。`ORG` で飛ばした範囲は `0x00` で埋まります。
 
 ```python
 from pz80 import assemble
@@ -164,7 +164,7 @@ result = Asm().assemble_chunks(chunks)
 
 **チャンクは上から順につながり、1 本のソースとして扱われます。** 次のものはチャンクをまたいで引き継がれます。
 
-* `ORG` で決めた番地
+* `ORG` で決めたアドレス
 * ラベル（どのチャンクで定義しても、どのチャンクからも参照できる）
 * `EQU` 定数（右辺の後方参照はチャンクをまたいでも有効。前方参照ができないのは 1 本のソースと同じ）
 * `IF` / `ELSE` / `ENDIF` の入れ子（`IF` がチャンクをまたいでもよい）
@@ -276,9 +276,9 @@ instructions = disassemble(gapped, valid_ranges=[[0x0000, 0x0003],
 
 `disassemble()` は行の文字列だけを返します。`data` の `fmt` で範囲を割り切れないときの警告などを受け取るには、`Disasm` クラスを使い、`exec()` の後に `warnings` を読んでください。
 
-### 行の無い番地を指す参照
+### 行の無いアドレスを指す参照
 
-`JP L_8000` のように、逆アセンブル結果に行が無い番地を指す参照には、先頭に `EQU` の定義が付きます。RAM へ飛ぶもの、命令の途中を指すもの、`valid_ranges` の隙間を指すものが該当します。
+`JP L_8000` のように、逆アセンブル結果に行が無いアドレスを指す参照には、先頭に `EQU` の定義が付きます。RAM へ飛ぶもの、命令の途中を指すもの、`valid_ranges` の隙間を指すものが該当します。
 
 ```asm
 L_8000: EQU 0x8000
@@ -287,7 +287,7 @@ org 0x0000
     HALT
 ```
 
-`equ_names` で同じ番地に名前を付けていても衝突しません。
+`equ_names` で同じアドレスに名前を付けていても衝突しません。
 
 ## データ領域の検出 (walk)
 
@@ -319,7 +319,7 @@ d.datamap = regions
 result = d.exec(0x0000, list(binary), len(binary))
 ```
 
-### 複数のファイルを別々の番地に置く
+### 複数のファイルを別々のアドレスに置く
 
 `read_chunks()` と `valid_ranges` を組み合わせると、ファイルの間の隙間を除いて解析できます。
 
@@ -358,7 +358,7 @@ result = d.exec(0x0000, images, len(images))
 
 `m1_handler` に復号の関数を渡します。`walk()` と `disassemble()` の両方に同じ関数を渡すと、データ領域の検出から逆アセンブルまで同じ復号が使われます。
 
-扱えるのは、命令のバイトを「番地とそのバイトの値」だけで復号できる方式です。暗号化された ROM のすべてに対応するわけではありません（[config.md](config.md#m1_handler) を参照）。
+扱えるのは、命令のバイトを「アドレスとそのバイトの値」だけで復号できる方式です。暗号化された ROM のすべてに対応するわけではありません（[config.md](config.md#m1_handler) を参照）。
 
 ```python
 from pz80 import Disasm, read_chunks, walk, disassemble
@@ -478,7 +478,7 @@ write_chunks([
 | 属性 | 内容 |
 | --- | --- |
 | `labelmap` | シンボル表 `[{"type": "equ"\|"label", "symbol": str, "value": int}, ...]` |
-| `label2address` | ラベルと番地の対応 `[{"label": str, "address": int}, ...]` |
+| `label2address` | ラベルとアドレスの対応 `[{"label": str, "address": int}, ...]` |
 
 * `labelmap` と `label2address` は同じシンボル表の別の見せ方で、食い違うことはありません。
 * **`equ` は大文字・小文字を区別しません。** `symbol` は大文字にそろえて登録されます（`Val: EQU 5` は `VAL` になり、`LD A,val` からも参照できる）。
@@ -497,7 +497,7 @@ write_chunks([
 | 消費された行 | `"kind"` を持つ | `line`, `file`, `asm`, `kind` |
 
 * `kind` は `"equ"` / `"org"` / `"if"` / `"else"` / `"endif"` / `"skipped"` のどれかです。`"skipped"` は条件アセンブルで捨てられた行です。
-* 各行の番地は `base + offset` です。消費された行は番地を持たないので、番地を求めるときは `"opcode"` か `"label"` を持つ行だけを使ってください。
+* 各行のアドレスは `base + offset` です。消費された行はアドレスを持たないので、アドレスを求めるときは `"opcode"` か `"label"` を持つ行だけを使ってください。
 * バイト列が欲しいだけなら、`assemble()` か `to_bytes()` を使ってください。
 
 ### Disasm クラス
@@ -507,14 +507,14 @@ write_chunks([
 | `exec(start, images, size)` | メソッド | バイナリイメージを逆アセンブルする |
 | `op2asm(adr, opcode)` | メソッド | 1 命令のバイト列を文字列にする |
 | `datamap` | プロパティ | データ領域（設定ファイルの `data`）。読むと `[[start, end], ...]` |
-| `label_addresses` | 属性 | ラベルを付ける番地のリスト（設定ファイルの `entry`） |
-| `label_names` | 属性 | `{番地: 名前}`（設定ファイルの `labels`） |
-| `label_no_imm` | プロパティ | `label_names` で `{"imm": False}` にした番地の集合（読み取り専用） |
-| `label_comments` | プロパティ | `label_names` の `comment` で書いた説明 `{番地: 文字列}`（読み取り専用） |
-| `equ_names` | 属性 | `{番地: 名前 \| {"name": …, "r": …, "w": …, "imm": …, "comment": …}}`（設定ファイルの `equ`）。読むと向きごとの名前 |
-| `equ_comments` | プロパティ | `equ_names` の `comment` で書いた説明 `{番地: 文字列}`（読み取り専用） |
-| `raw_operand` | プロパティ | オペランドを数値のまま出す命令の番地の集合 |
-| `comments` | プロパティ | `{番地: 文字列 \| {"line": …, "block": …}}` |
+| `label_addresses` | 属性 | ラベルを付けるアドレスのリスト（設定ファイルの `entry`） |
+| `label_names` | 属性 | `{アドレス: 名前}`（設定ファイルの `labels`） |
+| `label_no_imm` | プロパティ | `label_names` で `{"imm": False}` にしたアドレスの集合（読み取り専用） |
+| `label_comments` | プロパティ | `label_names` の `comment` で書いた説明 `{アドレス: 文字列}`（読み取り専用） |
+| `equ_names` | 属性 | `{アドレス: 名前 \| {"name": …, "r": …, "w": …, "imm": …, "comment": …}}`（設定ファイルの `equ`）。読み出すと `{アドレス: {"r": …, "w": …, "imm": …}}` の形（向きの一部だけのこともある） |
+| `equ_comments` | プロパティ | `equ_names` の `comment` で書いた説明 `{アドレス: 文字列}`（読み取り専用） |
+| `raw_operand` | プロパティ | オペランドを数値のまま出す命令のアドレスの集合 |
+| `comments` | プロパティ | `{アドレス: 文字列 \| {"line": …, "block": …}}` |
 | `valid_ranges` | プロパティ | バイナリが実在する範囲 `[[start, end], ...]`。隙間は出力から除外される |
 | `m1_handler` | 属性 | 復号の関数 `(addr, byte) -> byte` |
 | `cpu.strmap` | 属性 | `db` 行の `; [文字]` に使う 256 要素のタプル（設定ファイルの `chr`） |
