@@ -48,7 +48,11 @@ class ExpressionEvaluator:
         self.idx = 0
 
     def _loc(self):
-        """エラーメッセージ用の位置情報文字列。"""
+        """エラーメッセージ用の位置情報文字列。
+
+        Returns:
+            str: "line 5 in main.asm" または "line 5" の形式。
+        """
         return (
             f"line {self.line_num} in {self.file_name}"
             if self.file_name
@@ -60,6 +64,10 @@ class ExpressionEvaluator:
 
         Returns:
             int or None: 式全体の評価結果。トークンが空の場合はNone。
+
+        Raises:
+            ValueError: 式の後ろに余分なトークンが残った場合。下位の解析が出す
+                エラー（ゼロ除算、括弧の不一致、未定義シンボルなど）もそのまま届く。
         """
         if not self.tokens:
             return None
@@ -72,11 +80,21 @@ class ExpressionEvaluator:
         return value
 
     def _peek(self):
-        """次のトークンを消費せずに返します。"""
+        """次のトークンを消費せずに返します。
+
+        Returns:
+            str | None: 次のトークン。末尾に達していれば None。
+        """
         return self.tokens[self.idx] if self.idx < len(self.tokens) else None
 
     def _advance(self):
-        """次のトークンを返して消費します。"""
+        """次のトークンを返して消費します。
+
+        呼ぶ前に `_peek()` で、トークンが残っていることを確かめておきます。
+
+        Returns:
+            str: 消費したトークン。
+        """
         token = self.tokens[self.idx]
         self.idx += 1
         return token
@@ -86,13 +104,22 @@ class ExpressionEvaluator:
     # ------------------------------------------------------------------
 
     def _parse_expr(self):
-        """式全体の評価入口。最低優先度の演算子から解析を開始します。"""
+        """式全体の評価入口。最低優先度の演算子から解析を開始します。
+
+        括弧の中の式もここから解析します（`_parse_primary()` から呼ばれる）。
+
+        Returns:
+            int: 式の値。
+        """
         return self._parse_logical_or()
 
     def _parse_logical_or(self):
         """論理OR ( || ) を左結合で解析します。結果は 0 か 1。
 
         定数式なので短絡評価はしません（副作用が無く、右辺も必ず評価されます）。
+
+        Returns:
+            int: `1 || 0` なら 1。演算子が無ければ下位の値をそのまま返す。
         """
         val = self._parse_logical_and()
         while self._peek() == "||":
@@ -102,7 +129,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_logical_and(self):
-        """論理AND ( && ) を左結合で解析します。結果は 0 か 1。"""
+        """論理AND ( && ) を左結合で解析します。結果は 0 か 1。
+
+        Returns:
+            int: `1 && 0` なら 0。演算子が無ければ下位の値をそのまま返す。
+        """
         val = self._parse_or()
         while self._peek() == "&&":
             self._advance()
@@ -111,7 +142,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_or(self):
-        """ビットOR ( | ) を左結合で解析します。"""
+        """ビットOR ( | ) を左結合で解析します。
+
+        Returns:
+            int: `0x0F | 0x30` なら 0x3F。
+        """
         val = self._parse_xor()
         while self._peek() == "|":
             self._advance()
@@ -119,7 +154,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_xor(self):
-        """ビットXOR ( ^ ) を左結合で解析します。"""
+        """ビットXOR ( ^ ) を左結合で解析します。
+
+        Returns:
+            int: `0xFF ^ 0x0F` なら 0xF0。
+        """
         val = self._parse_and()
         while self._peek() == "^":
             self._advance()
@@ -127,7 +166,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_and(self):
-        """ビットAND ( & ) を左結合で解析します。"""
+        """ビットAND ( & ) を左結合で解析します。
+
+        Returns:
+            int: `0x1234 & 0xFF` なら 0x34。
+        """
         val = self._parse_equality()
         while self._peek() == "&":
             self._advance()
@@ -135,7 +178,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_equality(self):
-        """等価比較 ( == != ) を左結合で解析します。結果は 0 か 1。"""
+        """等価比較 ( == != ) を左結合で解析します。結果は 0 か 1。
+
+        Returns:
+            int: `3 == 3` なら 1。演算子が無ければ下位の値をそのまま返す。
+        """
         val = self._parse_relational()
         while self._peek() in ("==", "!="):
             op = self._advance()
@@ -144,7 +191,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_relational(self):
-        """大小比較 ( < <= > >= ) を左結合で解析します。結果は 0 か 1。"""
+        """大小比較 ( < <= > >= ) を左結合で解析します。結果は 0 か 1。
+
+        Returns:
+            int: `2 < 3` なら 1。演算子が無ければ下位の値をそのまま返す。
+        """
         comparisons = {
             "<": lambda a, b: a < b,
             "<=": lambda a, b: a <= b,
@@ -159,7 +210,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_shift(self):
-        """シフト演算子 ( << >> ) を左結合で解析します。"""
+        """シフト演算子 ( << >> ) を左結合で解析します。
+
+        Returns:
+            int: `1 << 4` なら 16。
+        """
         val = self._parse_add()
         while self._peek() in ("<<", ">>"):
             op = self._advance()
@@ -168,7 +223,11 @@ class ExpressionEvaluator:
         return val
 
     def _parse_add(self):
-        """加減算 ( + - ) を左結合で解析します。"""
+        """加減算 ( + - ) を左結合で解析します。
+
+        Returns:
+            int: `10 - 3 - 2` なら 5（左結合）。
+        """
         val = self._parse_mul()
         while self._peek() in ("+", "-"):
             op = self._advance()
@@ -177,7 +236,16 @@ class ExpressionEvaluator:
         return val
 
     def _parse_mul(self):
-        """乗除算・剰余 ( * / % ) を左結合で解析します。"""
+        """乗除算・剰余 ( * / % ) を左結合で解析します。
+
+        `/` は Python の `//` と同じく負の無限大へ丸めます（`-7 / 2` は -4）。
+
+        Returns:
+            int: `7 / 2` なら 3、`7 % 2` なら 1。
+
+        Raises:
+            ValueError: `/` の右辺が 0 の場合。
+        """
         val = self._parse_unary()
         while self._peek() in ("*", "/", "%"):
             op = self._advance()
@@ -197,7 +265,13 @@ class ExpressionEvaluator:
     # ------------------------------------------------------------------
 
     def _parse_unary(self):
-        """単項演算子 ( - + ~ ! ) を解析します。"""
+        """単項演算子 ( - + ~ ! ) を解析します。
+
+        単項演算子は重ねられます（`--1` は 1）。
+
+        Returns:
+            int: `-1` なら -1、`~0` なら -1、`!5` なら 0。
+        """
         token = self._peek()
         if token == "-":
             self._advance()
@@ -215,7 +289,16 @@ class ExpressionEvaluator:
         return self._parse_primary()
 
     def _parse_primary(self):
-        """アトム（数値・ラベル・$ ・括弧式）を解析します。"""
+        """アトム（数値・ラベル・$ ・括弧式）を解析します。
+
+        Returns:
+            int: アトムの値。数値は `int(token, 0)` で読み、文字リテラルは
+                `_parse_char_literal()`、それ以外は `_resolve_symbol()` に任せる。
+
+        Raises:
+            ValueError: 式が途中で終わった、現在アドレスが分からないのに `$` を
+                使った、または括弧が閉じていない場合。
+        """
         token = self._peek()
         if token is None:
             raise ValueError(f"Unexpected end of expression on {self._loc()}")
@@ -298,6 +381,9 @@ class ExpressionEvaluator:
 
         Returns:
             int: 文字コードの数値。2文字の場合は上位バイトに1文字目、下位バイトに2文字目を格納した値。
+
+        Raises:
+            ValueError: リテラルとして読めない、または 1〜2 文字でない場合。
         """
         try:
             v = ast.literal_eval(token)
@@ -306,7 +392,11 @@ class ExpressionEvaluator:
                 f"Invalid character literal '{token}' on {self._loc()}"
             ) from e
 
-        if not isinstance(v, str) or len(v) > 2:
-            raise ValueError("String literal in expression must be 1 or 2 characters")
+        # 空の '' も弾く。長さ 0 のまま進むと v[0] で IndexError になり、
+        # 行番号の無いエラーで止まっていた
+        if not isinstance(v, str) or not 1 <= len(v) <= 2:
+            raise ValueError(
+                f"String literal in expression must be 1 or 2 characters on {self._loc()}"
+            )
 
         return ord(v) if len(v) == 1 else (ord(v[0]) << 8) | ord(v[1])

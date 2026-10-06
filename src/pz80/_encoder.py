@@ -66,6 +66,10 @@ class Encoder:
                                  "size"(int)   : バイト数 (1 or 2)
                                  "type"(str)   : "byte", "word" , "rel"
                                  "src"(dict)   : _parse_operands() が返すオペランド辞書
+
+        Raises:
+            ValueError: 未知のニーモニック、またはオペランドの数や形が命令表に
+                合わない場合。Pass 1 で未定義のシンボルも、このエラーで届く。
         """
         if asmlist.get("asm") is None:
             return [], []
@@ -182,6 +186,9 @@ class Encoder:
 
         Returns:
             tuple[int | None, int]: (評価結果, 消費したトークン数)。
+
+        Raises:
+            ValueError: 未定義シンボル（`Undefined symbol`）の場合だけ。
         """
         try:
             return self.evaluate_expression(

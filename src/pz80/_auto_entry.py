@@ -74,6 +74,17 @@ class Finding:
     """
 
     def __init__(self, pattern, site, base=None, stride=2, targets=None, note=""):
+        """Finding を初期化します。
+
+        Args:
+            pattern (str): 認識した定型句の識別子（`jp-indirect` など）。
+            site (int): 定型句を検出したアドレス。
+            base (int | None): ジャンプテーブルの基底アドレス。テーブルが無い
+                定型句（`rst-vector` / `sp-ret` など）では None。
+            stride (int): テーブルの 1 要素のバイト数 (2=dw, 3=JP 命令列)。
+            targets (list[int] | None): 抽出したエントリポイント。None なら空。
+            note (str): 補足（解決不能な場合の理由など）。
+        """
         self.pattern = pattern
         self.site = site
         self.base = base
@@ -87,6 +98,10 @@ class Finding:
         テーブルが無い定型句（`rst-vector` / `sp-ret`）でも、分岐先が分かって
         いれば `-> ...` を出します。以前は `note` だけを見ていたため
         `rst-vector` の行が `@0x0006` で終わり、ベクタアドレスが読めませんでした。
+
+        Returns:
+            str: `[jp-indirect] @0x0120 table=0x0140 stride=2 -> 0x0200 0x0210`
+                のような 1 行。テーブルが無ければ `table=` / `stride=` を省きます。
         """
         if self.base is None:
             targets = " ".join(f"0x{t:04X}" for t in self.targets)
@@ -101,6 +116,11 @@ class Finding:
         )
 
     def __repr__(self):
+        """デバッグ表示用の文字列を返します。
+
+        Returns:
+            str: `<Finding [rst-vector] @0x0102 -> 0x0028>` の形。
+        """
         return f"<Finding {self.format()}>"
 
 
@@ -115,6 +135,7 @@ class AutoEntry:
     """
 
     def __init__(self, data, start=0, m1_handler=None, valid_ranges=None):
+        """AutoEntry を初期化し、ROM 全体の命令マップを作ります。"""
         self.data = list(data)
         self.size = len(self.data)
         self.start = 0 if valid_ranges is not None else start
@@ -133,7 +154,14 @@ class AutoEntry:
     # ------------------------------------------------------------------ 基本部品
 
     def in_rom(self, addr):
-        """アドレスが ROM 範囲（かつ valid_ranges 内）かを返す。"""
+        """アドレスが ROM 範囲（かつ valid_ranges 内）かを返す。
+
+        Args:
+            addr (int): 調べるアドレス。
+
+        Returns:
+            bool: ROM のバイトがあるアドレスなら True。
+        """
         if not (self.start <= addr < self.start + self.size):
             return False
         if self.valid_ranges is None:
@@ -141,7 +169,16 @@ class AutoEntry:
         return any(r[0] <= addr <= r[1] for r in self.valid_ranges)
 
     def byte(self, addr):
-        """アドレスの生バイトを返す。範囲外なら None。"""
+        """アドレスの生バイトを返す。範囲外なら None。
+
+        復号はしません。`m1_handler` があっても、ROM に書かれたままの値です。
+
+        Args:
+            addr (int): 読むアドレス。
+
+        Returns:
+            int | None: 0〜255 のバイト値。ROM の外なら None。
+        """
         if not self.in_rom(addr):
             return None
         return self.data[addr - self.start]
@@ -169,6 +206,13 @@ class AutoEntry:
 
         `resweep` で見つかった命令は `self.amap` に加わるため、
         アドレス順の索引を作り直します。
+
+        Args:
+            entries (iterable[int]): 追跡を始めるエントリポイント。
+
+        Returns:
+            tuple[set[int], set[int]]: (到達したバイトの集合, 命令先頭アドレスの集合)。
+                `walk.trace()` の戻り値そのもの。
         """
         before = len(self.amap)
         result = trace(
@@ -206,7 +250,18 @@ class AutoEntry:
         return addr in self.amap
 
     def plausible(self, addr, depth=PLAUSIBLE_DEPTH):
-        """addr からコードとして素直に復号できるかを返す。"""
+        """addr からコードとして素直に復号できるかを返す。
+
+        `depth` 命令ぶん追い、途中で ROM の外へ出たり復号できない場所に当たったり
+        しなければコードらしいとみなします。`RET` / `JP` で終われば、そこで True。
+
+        Args:
+            addr (int): 調べるアドレス（テーブルの要素の値など）。
+            depth (int): 追う命令数の上限。
+
+        Returns:
+            bool: コードとして読めそうなら True。
+        """
         if not self.in_rom(addr) or not self._ensure_mapped(addr):
             return False
         a = addr
@@ -223,7 +278,16 @@ class AutoEntry:
         return True
 
     def _consistent(self, addr, code, heads):
-        """既に確定したコードの命令途中に着地していないかを返す。"""
+        """既に確定したコードの命令途中に着地していないかを返す。
+
+        Args:
+            addr (int): 調べるアドレス。
+            code (set[int]): 現時点で確定している到達バイト集合。
+            heads (set[int]): 現時点で確定している命令先頭集合。
+
+        Returns:
+            bool: 命令の途中でなければ True。まだ到達していないアドレスも True。
+        """
         return not (addr in code and addr not in heads)
 
     def read_table(self, base, code, heads):
@@ -295,7 +359,17 @@ class AutoEntry:
         return (words, 2) if len(words) >= MIN_TABLE else ([], 0)
 
     def _backward(self, site, heads, window=BACK_WINDOW):
-        """site の直前の到達済み命令を新しい順に返す（基本ブロック内で打ち切る）。"""
+        """site の直前の到達済み命令を新しい順に返す（基本ブロック内で打ち切る）。
+
+        Args:
+            site (int): 遡り始めるアドレス（分岐命令の位置）。この命令自身は含めない。
+            heads (set[int]): 到達済みの命令先頭集合。
+            window (int): 集める命令数の上限。
+
+        Returns:
+            list[dict]: `amap` の命令（`"asm"` / `"opcode"` を持つ dict）。site に
+                近いものが先。無条件 `RET` / `JP` に当たったら、その手前で止めます。
+        """
         i = self.index.get(site)
         if i is None:
             return []
@@ -320,6 +394,12 @@ class AutoEntry:
 
         `LD hl,mmmm` → `LD (ram),hl` 形式と、
         `LD a,LL` → `LD (ram),a` / `LD a,HH` → `LD (ram+1),a` のバイト分割形式に対応。
+
+        Args:
+            ram (int): ポインタを置く RAM のアドレス。
+
+        Returns:
+            set[int]: 書き込まれる定数（テーブル基底の候補）。
         """
         bases = set()
         lo = hi = None
@@ -350,7 +430,18 @@ class AutoEntry:
         return bases
 
     def _bases_near(self, site, heads):
-        """site の直前から、テーブル基底になりうる定数を集める。"""
+        """site の直前から、テーブル基底になりうる定数を集める。
+
+        `LD rr, nnnn` の即値と、`LD hl, (nnnn)` の参照先を拾います。参照先が RAM
+        なら、そこへ書き込まれる定数を `_bases_from_ram()` で探します。
+
+        Args:
+            site (int): 分岐命令のアドレス。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            set[int]: テーブル基底の候補。確かめるのは `read_table()` です。
+        """
         bases = set()
         for p in self._backward(site, heads):
             asm = p["asm"]
@@ -373,7 +464,16 @@ class AutoEntry:
     # ---------------------------------------------------------- 定型句カタログ
 
     def scan(self, code, heads):
-        """到達済みコードからディスパッチ定型句を探し Finding のリストを返す。"""
+        """到達済みコードからディスパッチ定型句を探し Finding のリストを返す。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合（`trace()` の 1 つ目）。
+            heads (set[int]): 到達済みの命令先頭集合（`trace()` の 2 つ目）。
+
+        Returns:
+            list[Finding]: 定型句ごとの抽出結果。同じ地点が複数の形で見つかる
+                こともあります（重複は `run()` がまとめます）。
+        """
         findings = []
         findings += self._p_indirect_jp(code, heads)
         findings += self._p_push_ret(code, heads)
@@ -385,7 +485,18 @@ class AutoEntry:
         return findings
 
     def _emit(self, pattern, site, bases, code, heads):
-        """基底候補群からテーブルを読み出して Finding 化する。"""
+        """基底候補群からテーブルを読み出して Finding 化する。
+
+        Args:
+            pattern (str): 定型句の識別子。
+            site (int): 定型句を検出したアドレス。
+            bases (set[int]): テーブル基底の候補。
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: テーブルとして読めた候補ごとに 1 件。読めなければ空。
+        """
         out = []
         for b in sorted(bases):
             targets, stride = self.read_table(b, code, heads)
@@ -394,7 +505,15 @@ class AutoEntry:
         return out
 
     def _p_indirect_jp(self, code, heads):
-        """JP (hl) / JP (ix) / JP (iy) 直前のテーブル引き。"""
+        """JP (hl) / JP (ix) / JP (iy) 直前のテーブル引き。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `jp-indirect` の抽出結果。
+        """
         out = []
         for a in sorted(heads):
             if not RE_JP_IND.match(self.amap[a]["asm"]):
@@ -403,7 +522,17 @@ class AutoEntry:
         return out
 
     def _p_push_ret(self, code, heads):
-        """PUSH hl の直後の RET で分岐する形式。"""
+        """PUSH hl の直後の RET で分岐する形式。
+
+        `PUSH hl` と `RET` の間に、先へ進む命令を 2 つまで挟めます。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `push-ret` の抽出結果。
+        """
         out = []
         for a in sorted(heads):
             if self.amap[a]["asm"].strip().upper() != "PUSH HL":
@@ -430,6 +559,13 @@ class AutoEntry:
 
         復帰先は実行時のスタック内容なので静的には解決できない。
         取りこぼしの可能性がある箇所として報告のみ行う。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `sp-ret` の報告。`targets` は空で、`note` に理由を持つ。
         """
         out = []
         for a in sorted(heads):
@@ -466,6 +602,13 @@ class AutoEntry:
 
         呼ばれる側が POP hl / POP de で戻りアドレスを取り出していれば、
         CALL 命令の直後がテーブル本体になる。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `inline-after-call` の抽出結果。
         """
         pop_routines = {
             a
@@ -524,6 +667,14 @@ class AutoEntry:
         取り出す形なら戻ってこないので、`no_fallthrough` に site を積んで
         追跡側に伝える（`trace()` の `stop_after`）。これでテーブルのバイトは
         コードにならず、自然にデータへ落ちる。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `inline-after-rst` の抽出結果。テーブルが読めなかった
+                RST も `no_fallthrough` には積みます（戻り値には現れません）。
         """
         out = []
         verdict = {}
@@ -565,6 +716,13 @@ class AutoEntry:
 
         それでも誤検出の余地は残るため、根拠を `# auto-entry:` の行に出して
         利用者が判断できるようにしている。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `push-return` の抽出結果。`targets` は積んだ `nn` 1 つ。
         """
         out = []
         for a in sorted(heads):
@@ -613,7 +771,15 @@ class AutoEntry:
         return True
 
     def _p_rst(self, code, heads):
-        """到達コード中に RST n が実在する場合のみベクタを採用する。"""
+        """到達コード中に RST n が実在する場合のみベクタを採用する。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `rst-vector` の抽出結果。`targets` はベクタのアドレス 1 つ。
+        """
         out = []
         for a in sorted(heads):
             m = RE_RST.match(self.amap[a]["asm"])
@@ -631,6 +797,9 @@ class AutoEntry:
 
         NMI は暗号化 ROM でも復号後の命令列で判定する。生バイトで filler 判定を
         行うと、暗号化 ROM で RST ベクタが軒並み誤採用されるため。
+
+        Returns:
+            set[int]: 開始アドレス（RESET）と、コードらしければ NMI のアドレス。
         """
         entries = {self.start}
         nmi = VECTOR_ALIASES["NMI"]

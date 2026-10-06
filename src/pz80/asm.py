@@ -215,6 +215,10 @@ class Asm:
 
         Returns:
             list: assemble_lines() と同形式のアセンブル済みリスト。
+
+        Raises:
+            FileNotFoundError: ソースファイルが無い場合。
+            ValueError: ソースに誤りがある場合（`assemble_lines()` と同じ）。
         """
         try:
             with open(name, encoding="utf-8") as f:
@@ -237,6 +241,9 @@ class Asm:
 
         実体は前処理層が持つ。`Asm` 側で複製すると、前処理を個別に呼んだ場合に
         両者が食い違うため参照で返す。
+
+        Returns:
+            SymbolTable: 前処理層が持つシンボル表そのもの。
         """
         return self.preprocessor.symbols
 
@@ -245,6 +252,9 @@ class Asm:
         """アセンブラソースから抽出したラベル・EQU定数のリスト。
 
         `SymbolTable` へのビュー。`value` はラベルの場合 Pass 1 で確定する。
+
+        Returns:
+            list[dict]: `[{'type', 'symbol', 'value'}, ...]`。
         """
         return self.symbols.as_labelmap()
 
@@ -253,6 +263,9 @@ class Asm:
         """ラベルと確定アドレスの対応リスト。
 
         `SymbolTable` へのビュー。Pass 1 が `set_address()` で埋める。
+
+        Returns:
+            list[dict]: `[{"label": str, "address": int}, ...]`。
         """
         return self.symbols.as_label2address()
 

@@ -93,7 +93,18 @@ def format_entry(entry: dict) -> str:
 
 
 def generate_codetbl(entries: list) -> list[str]:
-    """エントリリストから _codetbl の Python コード行リストを生成する。"""
+    """エントリリストから _codetbl の Python コード行リストを生成する。
+
+    命令群の先頭（`nop` / CB の `rlc` など）の前には、`# 主命令 (op)` のような
+    区切りのコメント行を入れる。
+
+    Args:
+        entries (list[dict]): `z80_opcodes.yaml` を読んだエントリ。各要素は
+            `"code"` / `"asm"` などを持つ。
+
+    Returns:
+        list[str]: 改行付きの行。`    _codetbl = [` で始まり `    ]` で終わる。
+    """
     lines = []
     lines.append("    _codetbl = [\n")
 
@@ -109,6 +120,14 @@ def generate_codetbl(entries: list) -> list[str]:
     ]
 
     def code_of(e):
+        """エントリのオペコードをリストで返す。
+
+        Args:
+            e (dict): `z80_opcodes.yaml` の 1 エントリ。
+
+        Returns:
+            list[int]: オペコードのバイト列。`code` が無ければ空。
+        """
         return list(e["code"]) if e["code"] else []
 
     for entry in entries:
@@ -126,6 +145,12 @@ def generate_codetbl(entries: list) -> list[str]:
 
 
 def main():
+    """`z80_opcodes.yaml` から `z80.py` の生成区間を書き直します。
+
+    `z80.py` のマーカー（`BEGIN_MARKER` / `END_MARKER`）の間だけを置き換えます。
+    YAML や `z80.py` が無い、またはマーカーが見つからなければ `Error:` を出し、
+    終了コード 1 で終わります。
+    """
     if not YAML_PATH.exists():
         print(f"Error: {YAML_PATH} not found.")
         sys.exit(1)

@@ -37,6 +37,10 @@ class DirectiveHandler:
         Returns:
             list: 解析されたバイト値のリスト。ラベルや式はプレースホルダー 0x00。
                 例: [0x41, 0x42]
+
+        Raises:
+            ValueError: 文字列リテラルとして読めない、式として読めない、または
+                値が 0〜255 に収まらない場合。
         """
         opcodes = []
         loc = _format_location(item["line"], item.get("file"))
@@ -75,6 +79,10 @@ class DirectiveHandler:
                          例: {"line": 5, "asm": ["db", "LABEL"], "base": 0x100, "offset": 4, "opcode": [0x00]}
             address_map (dict): ラベルとアドレスの対応辞書。
                 例: {"LABEL": 0x0042}
+
+        Raises:
+            ValueError: 文字列リテラルとして読めない場合。式の値の検査
+                （`_eval_pass2_operand()`）が出すエラーもそのまま届く。
         """
         current_byte_offset = 0
         loc = _format_location(p["line"], p.get("file"))
@@ -190,6 +198,10 @@ class DirectiveHandler:
 
         Returns:
             list: count バイト分の 0x00 リスト（fill 指定時はその値）。
+
+        Raises:
+            ValueError: オペランドが無い、count や fill にラベルを書いた、count が
+                負、または fill が 0〜255 に収まらない場合。
         """
         loc = _format_location(item["line"], item.get("file"))
         operands = self._split_operands(item["asm"][1:])
@@ -416,10 +428,15 @@ class DirectiveHandler:
 
         Returns:
             list: リトルエンディアンのバイトリスト（2バイト）。
+
+        Raises:
+            ValueError: 文字列が 1〜2 文字でない（空の `''` を含む）、数値が
+                0〜65535 に収まらない、または文字列でも数値でもない場合。
         """
         loc = _format_location(line_num, file_name)
         if isinstance(value, str):
-            if len(value) > 2:
+            # 空の '' も弾く（長さ 0 のまま進むと value[0] で IndexError になる）
+            if not 1 <= len(value) <= 2:
                 raise ValueError(
                     f"String literal in DW must be 1 or 2 characters on {loc}: {token}"
                 )

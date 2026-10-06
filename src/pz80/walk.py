@@ -49,7 +49,16 @@ def merge_ranges(sorted_addrs):
 
 
 def _get_branch_target(asm_str):
-    """asm文字列から分岐先アドレスを抽出する。"""
+    """asm文字列から分岐先アドレスを抽出する。
+
+    逆アセンブラは分岐先を `L_xxxx` のラベルで書くので、その 4 桁を読みます。
+
+    Args:
+        asm_str (str): 逆アセンブル済み命令文字列（例: `"JP nz, L_0150"`）。
+
+    Returns:
+        int | None: 分岐先アドレス（例: 0x0150）。`L_xxxx` が無ければ None。
+    """
     m = _RE_LABEL.search(asm_str)
     return int(m.group(1), 16) if m else None
 
@@ -326,6 +335,15 @@ def walk(
     valid = address_set(start, size, valid_ranges)
 
     def resweep(addr):
+        """addr から走査し直し、有効範囲内の命令だけを返す（`trace()` に渡す）。
+
+        Args:
+            addr (int): 走査を始めるアドレス。
+
+        Returns:
+            dict[int, dict]: アドレスをキーとする逆アセンブル結果。addr が
+                有効範囲の外なら空。
+        """
         if addr not in valid:
             return {}
         return {

@@ -938,6 +938,12 @@ class Disasm:
                      {"address": 0x100, "opcode": [0x3E, 0x10], "asm": "LD A, 10"},
                      {"address": 0x102, "opcode": [0xC3, 0x00, 0x01],
                       "asm": "JP L_0100", "label": "L_0100:"}]
+
+        Raises:
+            ValueError: 設定が逆アセンブル範囲と合わない場合。`valid_ranges` が
+                範囲と重ならない、`label_names` / `comments` が範囲の外を指す、
+                `comments` が命令や `dw` の途中を指す、など。`m1_handler` が
+                出した ValueError もそのまま届く。
         """
         maxword = 0xFFFF
 

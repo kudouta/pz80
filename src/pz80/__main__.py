@@ -152,7 +152,11 @@ class CliConfig:
 
     @property
     def size(self):
-        """イメージの有効長。"""
+        """イメージの有効長。
+
+        Returns:
+            int: `images` のバイト数。
+        """
         return len(self.images)
 
 
