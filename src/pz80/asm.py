@@ -473,6 +473,13 @@ class Asm:
         変位は**次の命令の先頭**（現在アドレス + 命令長）からの差です。
         Z80 は 8bit 符号付きなので -128〜+127 に収まる必要があります。
 
+        **差は 64KB で回り込ませてから測ります。** PC は 16 ビットのレジスタで、
+        `PC + e` の結果を入れる 17 ビット目は無いので、0xFFFF の次は 0x0000 になる、
+        という CPU の一般論に従います（Z80 の資料に明記は無い）。この考えでは、0x0002 の
+        `JR` は 0xFFF0 へ飛べます（変位 -20）。逆アセンブラも飛び先を `L_FFF0` と
+        回り込んだアドレスで書きます（`Disasm._reladdr()`）。単純な差
+        （0xFFF0 - 0x0004 = 65516）で比べていたときは、これを範囲外にしていました。
+
         Args:
             p (dict): 対象のアセンブル行。
             opcode (list): 書き換え対象のオペコードバイト列。
@@ -480,10 +487,13 @@ class Asm:
             address (int): 解決済みのジャンプ先アドレス。
 
         Raises:
-            ValueError: 変位が 8bit 符号付きの範囲を外れる場合。
+            ValueError: 回り込ませた変位が 8bit 符号付きの範囲を外れる場合。文面の
+                変位も回り込ませた後の値（例: `(-274)`）。
         """
         pc = p["base"] + p["offset"] + len(opcode)
-        offset = address - pc
+        offset = (address - pc) & 0xFFFF
+        if offset >= 0x8000:
+            offset -= 0x10000
         if not (-128 <= offset <= 127):
             loc = _format_location(p["line"], p.get("file"))
             raise ValueError(f"Relative jump out of range ({offset}) on {loc}")
