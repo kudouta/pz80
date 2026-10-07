@@ -82,6 +82,7 @@ ban-relative-imports = "all"
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.8.0",
     "pyyaml>=6.0",
     "ruff>=0.9",
 ]
@@ -93,4 +94,7 @@ testpaths = ["tests"]
 # 計測は CI と、明示的な `pytest --cov --cov-report=term-missing` で行う。
 # `--cov` に引数を渡さないこと。対象は上の source_pkgs で定義しており、
 # `--cov=pz80` と書くと二重指定になって module-not-measured の警告が出る。
-addopts = "-v"
+#
+# `-n auto` で CPU の数だけ並べて走らせる（pytest-xdist）。`--dist loadgroup` は、
+# 同じ `xdist_group` を付けたテストを同じワーカーに送る。1 本ずつ走らせたいときは `-n 0`。
+addopts = "-v -n auto --dist loadgroup"
