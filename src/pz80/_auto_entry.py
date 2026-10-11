@@ -37,6 +37,8 @@ RE_JP_IND = re.compile(r"^JP\s+\((hl|ix|iy)\)$", re.I)
 RE_POP_PTR = re.compile(r"^POP\s+(hl|ix|iy)$", re.I)
 RE_RST = re.compile(r"^RST\s+(0x[0-9A-Fa-f]+|\d+)$", re.I)
 RE_LD_HL_IMM = re.compile(r"^LD\s+hl,\s*0x([0-9A-Fa-f]{4})$", re.I)
+# 割り込みモードを 0 か 1 にする命令（`im-vector`）。IM 2 は飛び先が表で決まるので扱わない
+RE_IM_0_1 = re.compile(r"^IM\s+([01])$", re.I)
 # `@名前` は省略可。disasm が label_names でラベルに名前を添えた出力も読めるようにする。
 RE_CALL = re.compile(r"^CALL\s+(?:(\w+),\s*)?L_([0-9A-Fa-f]{4})(?:@[\w.]+)?$", re.I)
 
@@ -482,6 +484,7 @@ class AutoEntry:
         findings += self._p_inline_after_rst(code, heads)
         findings += self._p_push_return(code, heads)
         findings += self._p_rst(code, heads)
+        findings += self._p_im_vector(code, heads)
         return findings
 
     def _emit(self, pattern, site, bases, code, heads):
@@ -789,6 +792,71 @@ class AutoEntry:
             if self.in_rom(vec):
                 out.append(Finding("rst-vector", a, targets=[vec]))
         return out
+
+    def _p_im_vector(self, code, heads):
+        """到達コードに `IM 1` / `IM 0` があれば、INT の入口 0x0038 を採用する。
+
+        INT（通常の割り込み）の入口は、どこからも飛ばれないので追跡では届かない。
+        **割り込みモードを選ぶ命令が ROM の中にあれば、それを証拠にする。**
+
+        * `IM 1`: INT で必ず 0x0038 へ飛ぶ
+        * `IM 0`: 基板がデータバスに置いた命令を実行する。多くの基板は何も置かず
+          バスが 0xFF（`RST 38`）になるので、0x0038 へ飛ぶ。**別の `RST` を置く基板も
+          あるので、`im0-vector` と分けて出し、利用者が判断できるようにする**
+        * `IM 2`: 飛び先は I レジスタと基板が置くベクタで引く表で決まる。扱わない
+
+        0x0038 がコードとして素直に読めるとき（`plausible()`）だけ採る。これが無いと、
+        INT で動く基板では割り込み処理がまるごとデータとして扱われる。
+
+        **詰め物は採らない**（`_is_filler_run()`）。`IM 1` を実行しても割り込みを許可しない
+        （`EI` しない）プログラムでは、0x0038 に処理が無く、詰め物が並ぶ。0x00 の詰め物は
+        `NOP` の並びで `plausible()` を通ってしまい、そのまま後ろのコードへ滑り込む。
+        **先頭が `NOP` というだけでは詰め物と決めない。** `NOP` / `JP nnnn` のように、
+        `NOP` から始まる本物の割り込み処理がある。
+
+        Args:
+            code (set[int]): 到達済みのバイト集合。
+            heads (set[int]): 到達済みの命令先頭集合。
+
+        Returns:
+            list[Finding]: `im1-vector` / `im0-vector` の抽出結果。`IM` 命令ごとに 1 件で、
+                `targets` は 0x0038 の 1 つ。
+        """
+        vector = VECTOR_ALIASES["IM1"]
+        if not (self.in_rom(vector) and self.plausible(vector)):
+            return []
+        if self._is_filler_run(vector):
+            return []
+        out = []
+        for a in sorted(heads):
+            m = RE_IM_0_1.match(self.amap[a]["asm"].strip())
+            if m:
+                out.append(Finding(f"im{m.group(1)}-vector", a, targets=[vector]))
+        return out
+
+    def _is_filler_run(self, addr, depth=PLAUSIBLE_DEPTH):
+        """addr から詰め物（`NOP` か `RST 0x38`）だけが並んでいるかを返す。
+
+        0x00 で埋めた領域は `NOP` の並び、0xFF で埋めた領域は `RST 0x38` の並びになる。
+        `plausible()` と同じ `depth` 命令ぶんがすべて詰め物なら True。途中に詰め物でない
+        命令があれば False（`NOP` / `JP nnnn` のような本物の処理を詰め物と取り違えない）。
+
+        Args:
+            addr (int): 調べるアドレス。
+            depth (int): 見る命令数。
+
+        Returns:
+            bool: 詰め物だけが並んでいれば True。
+        """
+        a = addr
+        for _ in range(depth):
+            p = self.amap.get(a)
+            if p is None:
+                return True
+            if p["asm"].strip().upper() not in ("NOP", "RST 0X38"):
+                return False
+            a += len(p["opcode"])
+        return True
 
     # ------------------------------------------------------------------- 反復
 

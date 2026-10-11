@@ -19,7 +19,7 @@
 C:\>pz80
 usage: pz80 [-h] {disasm,walk,asm} ...
 
-Z80 assembler & disassembler v0.4.69
+Z80 assembler & disassembler v0.4.70
 
 positional arguments:
   {disasm,walk,asm}
@@ -223,6 +223,8 @@ data = [
 | `inline-after-rst` | `RST n` の直後に表（[下記](#rst-直後の表)） | 同上 |
 | — | 表の中身が `JP nnnn` の並び | 各 `JP` のアドレスをエントリにする（上の形で表を読むときに判定） |
 | `rst-vector` | 到達したコードにある `RST n` | その飛び先をエントリにする |
+| `im1-vector` | 到達したコードにある `IM 1` | INT の入口 `0x0038` をエントリにする。`0x0038` が詰め物（`NOP` や `RST 0x38` の並び）なら採らない |
+| `im0-vector` | 到達したコードにある `IM 0` | 同上。IM 0 の飛び先は基板がデータバスに置く命令で決まり、`RST 0x38` とは限らないので、形の名前を分けている |
 | `push-return` | `LD HL,nn` → `PUSH HL`（[下記](#積んだ戻り先)） | `nn` をエントリにする |
 | `sp-ret` | `LD SP,HL` → `RET` / `RETN` | 飛び先が実行時のスタックで決まるので、報告だけする |
 
