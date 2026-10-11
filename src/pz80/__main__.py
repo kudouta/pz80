@@ -120,8 +120,10 @@ class CliConfig:
 
     Attributes:
         images (list[int]): アドレス 0 基点のイメージ。
-        valid_ranges (list[list[int]] | None): 有効アドレス範囲。bins 指定時のみ。
+        valid_ranges (list[list[int]] | None): ROM のある範囲。bins ならファイルごと、
+            -i なら `[[0x0000, 大きさ - 1]]`。例: `[[0x0000, 0x0FFF], [0x2000, 0x27FF]]`。
         start (int): 開始アドレス（walk ではメインエントリポイントも兼ねる）。
+            ROM を置く位置ではない（ROM の位置は bins か、-i なら 0x0000）。
         entries (list): 追加エントリポイント。未 parse の生値（シンボル名も可）。
         m1_handler (Callable | None): M1サイクル復号ハンドラー。
         datamap (list | None): データ領域（disasm のみ）。要素は `[開始, 終了]`
@@ -216,6 +218,12 @@ def resolve_config(args):
             )
             sys.exit(1)
         cfg.images = _load_images_from_input(args.input)
+        # -i の ROM は 0x0000 から並べる。bins と同じく ROM のある範囲を渡しておく。
+        # 渡さないと walk と auto-entry は start を ROM を置く位置として使い、
+        # `walk -i rom.bin -s 2` が ROM を 0x0002 に置いていた（disasm は 0x0000）。
+        # 空のファイルでは範囲を作れないので入れない（disasm は開始アドレスの検査で止まる）。
+        if cfg.images:
+            cfg.valid_ranges = [[0, len(cfg.images) - 1]]
 
     return cfg
 
@@ -447,6 +455,18 @@ def command_disasm(args):
             )
             sys.exit(1)
 
+    # 開始アドレスが ROM の終わりより後ろだと、逆アセンブルする命令が無く、`org` の
+    # 1 行だけを出して正常に終わっていた。入口のアドレスまで ROM が届いていない
+    # テストが、それで素通りしていた。bins の隙間から始めるのは今までどおり許す
+    # （次の ROM から逆アセンブルする。既定の 0 がこれに頼る）。
+    if not 0 <= start < size:
+        print(
+            f"Error: start address 0x{start:04X} is outside the ROM"
+            f" (size 0x{size:04X})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # 逆アセンブル。範囲に関わる設定（範囲外の labels / comments、命令や dw の
     # 途中を指す comments など）は、範囲が決まるここで初めて検査される。
     try:
@@ -523,7 +543,9 @@ def _auto_detect_entries(cfg, seed_entries):
     # 抽出も m1_handler を通して ROM を読むので、walk 本体と同じく
     # ValueError は `Error:` の 1 行で止める。
     try:
-        seed = [parse_entry(e) for e in seed_entries]
+        # 開始アドレスも入口に入れる。auto-entry が自分で入れる入口は 0x0000 と NMI
+        # だけで、-s / start を渡さないと、そこからしか届かないコードの表を探さない。
+        seed = [cfg.start] + [parse_entry(e) for e in seed_entries]
         ae = AutoEntry(
             cfg.images,
             start=cfg.start,
