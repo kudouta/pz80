@@ -866,12 +866,16 @@ class AutoEntry:
         NMI は暗号化 ROM でも復号後の命令列で判定する。生バイトで filler 判定を
         行うと、暗号化 ROM で RST ベクタが軒並み誤採用されるため。
 
+        詰め物の判定は INT の入口（`_p_im_vector()`）と同じ `_is_filler_run()` を使う。
+        以前は「先頭の命令が `NOP` か」だけを見ていたので、`NOP` から始まる本物の NMI 処理を
+        落とし、0xFF の詰め物（`RST 0x38` の並び）は入口にしていた。
+
         Returns:
             set[int]: 開始アドレス（RESET）と、コードらしければ NMI のアドレス。
         """
         entries = {self.start}
         nmi = VECTOR_ALIASES["NMI"]
-        if self.plausible(nmi) and self.amap[nmi]["asm"].strip().upper() != "NOP":
+        if self.plausible(nmi) and not self._is_filler_run(nmi):
             entries.add(nmi)
         return entries
 
