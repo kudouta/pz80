@@ -39,7 +39,8 @@ _EQU_FALLBACK = {
 _LABEL_KEYS = ("name", "imm", "comment")
 
 # `equ` の値に辞書を書くときのキー。向きの名前（`_EQU_MODES`）に加えて、
-# `name` は書いていない向きすべての名前、`comment` は `EQU` 行に付ける説明。
+# `name` は `r` / `w` / `imm` のうち個別に指定しなかったものに使う名前、`comment` は
+# `EQU` 行に付ける説明。
 _EQU_KEYS = (*_EQU_MODES, "name", "comment")
 
 # `comments` の値に辞書を書くときのキー。`line` は行末、`block` は行の前。
@@ -165,8 +166,9 @@ class Disasm:
         lint にかけると ruff の `C408`（`Unnecessary dict() call`）が出るので、
         例は波括弧で書いています。
 
-        `name` は**書いていない向きすべての名前**です。`{"name": X}` は文字列の
-        `X` と同じ結果になり、1 つの向きだけ別の名前にする書き方ができます。
+        `name` は、`r`（読み）・`w`（書き）・`imm`（即値）のうち、**個別に指定しなかった
+        ものに使う名前**です。`{"name": X}` は文字列の `X` と同じ結果になり、1 つの向き
+        だけ別の名前にする書き方ができます。
 
             0xE000: {"name": "Port", "w": "Latch"},   # 読みと即値は Port
 
@@ -201,7 +203,7 @@ class Disasm:
             has_comment = "comment" in names
             comment = names.pop("comment", None)
             default = names.pop("name", None)
-            # `name` は書いていない向きすべての名前。即値も埋めるので、
+            # `name` は r / w / imm のうち個別に指定しなかったものに使う名前。即値も埋めるので、
             # `{"name": "Port", "r": "In"}` の即値は `In` ではなく `Port` になる。
             checked = list(names.values()) + ([default] if default is not None else [])
             if default is not None:
